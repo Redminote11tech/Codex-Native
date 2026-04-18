@@ -981,9 +981,18 @@ fn handle_view_message(
             Ok(())
         }
         "fetch" => handle_fetch_request(webview, global_state, config_state, auth_state, payload),
-        "mcp-request" => handle_mcp_request(webview, config_state, auth_state, app_server, payload),
+        "mcp-request" => handle_mcp_request(
+            webview,
+            global_state,
+            config_state,
+            auth_state,
+            app_server,
+            payload,
+        ),
         "mcp-response" => handle_mcp_response(app_server, payload),
-        "thread-prewarm-start" => handle_app_server_request_passthrough(app_server, payload),
+        "thread-prewarm-start" => {
+            handle_app_server_request_passthrough(global_state, app_server, payload)
+        }
         _ => Ok(()),
     }
 }
@@ -1335,6 +1344,7 @@ fn handle_fetch_request(
 #[cfg(target_os = "linux")]
 fn handle_mcp_request(
     webview: &WebView,
+    global_state: &JsonMapState,
     config_state: &JsonMapState,
     auth_state: &JsonMapState,
     app_server: Option<&AppServerBridge>,
@@ -1358,7 +1368,8 @@ fn handle_mcp_request(
 
     if let Some(app_server) = app_server {
         if !is_locally_handled_mcp_method(method) {
-            return app_server.send_json(request);
+            let request = rewrite_app_server_request(global_state, request);
+            return app_server.send_json(&request);
         }
     }
 
@@ -1607,6 +1618,7 @@ fn handle_mcp_response(
 
 #[cfg(target_os = "linux")]
 fn handle_app_server_request_passthrough(
+    global_state: &JsonMapState,
     app_server: Option<&AppServerBridge>,
     payload: &JsonValue,
 ) -> Result<(), String> {
@@ -1614,7 +1626,8 @@ fn handle_app_server_request_passthrough(
         .get("request")
         .ok_or("app-server passthrough is missing request")?;
     if let Some(app_server) = app_server {
-        app_server.send_json(request)?;
+        let request = rewrite_app_server_request(global_state, request);
+        app_server.send_json(&request)?;
     }
     Ok(())
 }
@@ -2143,6 +2156,62 @@ fn current_workspace_roots(global_state: &JsonMapState) -> Vec<String> {
 }
 
 #[cfg(target_os = "linux")]
+fn selected_workspace_root(global_state: &JsonMapState) -> Option<String> {
+    current_workspace_roots(global_state).into_iter().next()
+}
+
+#[cfg(target_os = "linux")]
+fn rewrite_app_server_request(global_state: &JsonMapState, request: &JsonValue) -> JsonValue {
+    let Some(method) = request.get("method").and_then(JsonValue::as_str) else {
+        return request.clone();
+    };
+
+    if method != "thread/start" {
+        return request.clone();
+    }
+
+    let Some(selected_root) = selected_workspace_root(global_state) else {
+        return request.clone();
+    };
+
+    let home_root = std::env::var_os("HOME")
+        .and_then(|path| PathBuf::from(path).to_str().map(str::to_owned))
+        .and_then(|path| normalize_workspace_root(&path));
+    let selected_root_is_home = home_root.as_deref() == Some(selected_root.as_str());
+
+    if selected_root_is_home {
+        return request.clone();
+    }
+
+    let mut rewritten = request.clone();
+    let Some(params) = rewritten.get_mut("params").and_then(JsonValue::as_object_mut) else {
+        return rewritten;
+    };
+
+    let should_override = match params.get("cwd").and_then(JsonValue::as_str) {
+        None => true,
+        Some(cwd) if cwd.trim().is_empty() => true,
+        Some(cwd) => {
+            let normalized_cwd = normalize_workspace_root(cwd).unwrap_or_else(|| cwd.to_string());
+            match home_root.as_deref() {
+                Some(home_root) => normalized_cwd == home_root,
+                None => cwd == std::env::var("HOME").unwrap_or_default(),
+            }
+        }
+    };
+
+    if should_override {
+        eprintln!(
+            "native-shell: rewriting thread/start cwd to selected workspace root {}",
+            selected_root
+        );
+        params.insert("cwd".to_string(), json!(selected_root));
+    }
+
+    rewritten
+}
+
+#[cfg(target_os = "linux")]
 fn save_workspace_root(global_state: &JsonMapState, root: &str) -> Vec<String> {
     let mut roots = current_workspace_roots(global_state);
     roots.retain(|existing| existing != root);
@@ -2644,5 +2713,124 @@ fn normalize_plan_type(plan_type: Option<&str>) -> &'static str {
         "enterprise" => "enterprise",
         "edu" => "edu",
         _ => "unknown",
+    }
+}
+
+#[cfg(all(target_os = "linux", test))]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn test_global_state_with_workspace(root: &str) -> JsonMapState {
+        let state: JsonMapState = Rc::new(RefCell::new(HashMap::new()));
+        state.borrow_mut().insert(
+            WORKSPACE_ROOTS_STATE_KEY.to_string(),
+            json!([root.to_string()]),
+        );
+        state
+    }
+
+    fn temp_workspace_dir(name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("codex-native-{name}-{unique}"));
+        fs::create_dir_all(&path).expect("temporary workspace should be created");
+        path
+    }
+
+    #[test]
+    fn rewrite_thread_start_uses_selected_workspace_when_cwd_missing() {
+        let selected_root = temp_workspace_dir("rewrite-missing-cwd");
+        let selected_root = fs::canonicalize(&selected_root)
+            .expect("selected root should canonicalize")
+            .to_string_lossy()
+            .to_string();
+        let global_state = test_global_state_with_workspace(&selected_root);
+        let request = json!({
+            "id": "req-1",
+            "method": "thread/start",
+            "params": {
+                "model": "gpt-5.4"
+            }
+        });
+
+        let rewritten = rewrite_app_server_request(&global_state, &request);
+
+        assert_eq!(
+            rewritten
+                .get("params")
+                .and_then(|params| params.get("cwd"))
+                .and_then(JsonValue::as_str),
+            Some(selected_root.as_str())
+        );
+
+        let _ = fs::remove_dir_all(PathBuf::from(&selected_root));
+    }
+
+    #[test]
+    fn rewrite_thread_start_replaces_home_cwd_with_selected_workspace() {
+        let selected_root = temp_workspace_dir("rewrite-home-cwd");
+        let selected_root = fs::canonicalize(&selected_root)
+            .expect("selected root should canonicalize")
+            .to_string_lossy()
+            .to_string();
+        let global_state = test_global_state_with_workspace(&selected_root);
+        let home = std::env::var("HOME").expect("HOME should be set for shell tests");
+        let request = json!({
+            "id": "req-2",
+            "method": "thread/start",
+            "params": {
+                "cwd": home
+            }
+        });
+
+        let rewritten = rewrite_app_server_request(&global_state, &request);
+
+        assert_eq!(
+            rewritten
+                .get("params")
+                .and_then(|params| params.get("cwd"))
+                .and_then(JsonValue::as_str),
+            Some(selected_root.as_str())
+        );
+
+        let _ = fs::remove_dir_all(PathBuf::from(&selected_root));
+    }
+
+    #[test]
+    fn rewrite_thread_start_keeps_explicit_project_cwd() {
+        let selected_root = temp_workspace_dir("rewrite-selected-root");
+        let selected_root = fs::canonicalize(&selected_root)
+            .expect("selected root should canonicalize")
+            .to_string_lossy()
+            .to_string();
+        let explicit_root = temp_workspace_dir("rewrite-explicit-root");
+        let explicit_root = fs::canonicalize(&explicit_root)
+            .expect("explicit root should canonicalize")
+            .to_string_lossy()
+            .to_string();
+        let global_state = test_global_state_with_workspace(&selected_root);
+        let request = json!({
+            "id": "req-3",
+            "method": "thread/start",
+            "params": {
+                "cwd": explicit_root
+            }
+        });
+
+        let rewritten = rewrite_app_server_request(&global_state, &request);
+
+        assert_eq!(
+            rewritten
+                .get("params")
+                .and_then(|params| params.get("cwd"))
+                .and_then(JsonValue::as_str),
+            Some(explicit_root.as_str())
+        );
+
+        let _ = fs::remove_dir_all(PathBuf::from(&selected_root));
+        let _ = fs::remove_dir_all(PathBuf::from(&explicit_root));
     }
 }
