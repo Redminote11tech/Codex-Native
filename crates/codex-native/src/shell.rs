@@ -883,6 +883,40 @@ fn handle_view_message(
             );
             Ok(())
         }
+        "electron-onboarding-skip-workspace" => {
+            let selected_root = preferred_workspace_root(global_state);
+
+            if let Some(root) = selected_root.as_deref() {
+                let roots = save_workspace_root(global_state, root);
+                let labels = workspace_root_labels(&roots);
+
+                dispatch_message_to_view(
+                    webview,
+                    &json!({
+                        "type": "active-workspace-roots-changed",
+                        "roots": roots,
+                    }),
+                );
+                dispatch_message_to_view(
+                    webview,
+                    &json!({
+                        "type": "workspace-root-options-changed",
+                        "roots": roots,
+                        "labels": labels,
+                    }),
+                );
+            }
+
+            dispatch_message_to_view(
+                webview,
+                &json!({
+                    "type": "electron-onboarding-skip-workspace-result",
+                    "success": selected_root.is_some(),
+                    "root": selected_root,
+                }),
+            );
+            Ok(())
+        }
         "workspace-root-option-picked" => {
             let root = payload
                 .get("root")
@@ -2126,6 +2160,39 @@ fn normalize_workspace_root(root: &str) -> Option<String> {
         .ok()
         .or(Some(expanded))
         .and_then(|path| path.to_str().map(str::to_owned))
+}
+
+#[cfg(target_os = "linux")]
+fn preferred_workspace_root(global_state: &JsonMapState) -> Option<String> {
+    if let Some(root) = current_workspace_roots(global_state).into_iter().next() {
+        return Some(root);
+    }
+
+    if let Ok(current_dir) = std::env::current_dir() {
+        let current_dir = current_dir.to_string_lossy().to_string();
+        if current_dir != "/" {
+            if let Some(root) = normalize_workspace_root(&current_dir) {
+                return Some(root);
+            }
+        }
+    }
+
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    for candidate in [
+        home.join("Projects"),
+        home.join("Code"),
+        home.join("src"),
+        home.join("dev"),
+        home.join("Development"),
+        home.join("Documents"),
+        home.clone(),
+    ] {
+        if let Some(root) = candidate.to_str().and_then(normalize_workspace_root) {
+            return Some(root);
+        }
+    }
+
+    None
 }
 
 #[cfg(target_os = "linux")]
