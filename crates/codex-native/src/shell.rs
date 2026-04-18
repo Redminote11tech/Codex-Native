@@ -4,8 +4,8 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Component, Path, PathBuf};
-use std::rc::Rc;
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -32,10 +32,10 @@ use tao::window::WindowBuilder;
 
 #[cfg(target_os = "linux")]
 use webkit2gtk::{
-    SecurityManagerExt, SettingsExt, URISchemeRequest, URISchemeRequestExt,
-    URISchemeResponse, URISchemeResponseExt, UserContentInjectedFrames, UserContentManager,
-    UserContentManagerExt, UserScript, UserScriptInjectionTime, WebContext, WebContextExt,
-    WebView, WebViewExt, WebViewExtManual,
+    SecurityManagerExt, SettingsExt, URISchemeRequest, URISchemeRequestExt, URISchemeResponse,
+    URISchemeResponseExt, UserContentInjectedFrames, UserContentManager, UserContentManagerExt,
+    UserScript, UserScriptInjectionTime, WebContext, WebContextExt, WebView, WebViewExt,
+    WebViewExtManual,
 };
 
 #[cfg(not(target_os = "linux"))]
@@ -197,10 +197,7 @@ struct LocalAuthSnapshot {
 #[cfg(target_os = "linux")]
 enum AppServerBridgeEvent {
     Response(JsonValue),
-    Notification {
-        method: String,
-        params: JsonValue,
-    },
+    Notification { method: String, params: JsonValue },
     Request(JsonValue),
     Fatal(String),
 }
@@ -262,7 +259,10 @@ pub fn run(web_root: PathBuf) -> Result<(), String> {
 #[cfg(target_os = "linux")]
 fn run_linux_gtk(web_root: PathBuf) -> Result<(), String> {
     ensure_web_root(&web_root)?;
-    eprintln!("native-shell: gtk startup with web root {}", web_root.display());
+    eprintln!(
+        "native-shell: gtk startup with web root {}",
+        web_root.display()
+    );
 
     gtk::init().map_err(|error| format!("failed to initialize gtk: {error}"))?;
     eprintln!("native-shell: gtk initialized");
@@ -274,9 +274,7 @@ fn run_linux_gtk(web_root: PathBuf) -> Result<(), String> {
         .map(|value| value != "0")
         .unwrap_or(true);
     window.set_decorated(!use_client_decorations);
-    eprintln!(
-        "native-shell: window created (client_decorations={use_client_decorations})"
-    );
+    eprintln!("native-shell: window created (client_decorations={use_client_decorations})");
 
     let context = WebContext::default().ok_or("failed to create WebKit web context")?;
     let security_manager = context
@@ -386,8 +384,7 @@ fn run_linux_gtk(web_root: PathBuf) -> Result<(), String> {
             }
         },
     );
-    let settings = WebViewExt::settings(&webview)
-        .ok_or("failed to access WebKit settings")?;
+    let settings = WebViewExt::settings(&webview).ok_or("failed to access WebKit settings")?;
     settings.set_enable_developer_extras(true);
     settings.set_enable_write_console_messages_to_stdout(true);
     webview.connect_load_changed(|_, event| {
@@ -425,35 +422,33 @@ fn run_linux_gtk(web_root: PathBuf) -> Result<(), String> {
         );
     });
     webview.connect_load_failed(|_, event, uri, error| {
-        eprintln!(
-            "native-shell: load failed event={event:?} uri={uri} error={error}"
-        );
+        eprintln!("native-shell: load failed event={event:?} uri={uri} error={error}");
         false
     });
     eprintln!("native-shell: webview created");
 
     window.add(&webview);
-    let start_mode = std::env::var("CODEX_NATIVE_START_MODE")
-        .unwrap_or_else(|_| "codex".to_string());
+    let start_mode =
+        std::env::var("CODEX_NATIVE_START_MODE").unwrap_or_else(|_| "codex".to_string());
     if let Ok(start_url) = std::env::var("CODEX_NATIVE_START_URL") {
         webview.load_uri(&start_url);
     } else {
         match start_mode.as_str() {
-        "simple" => {
-            webview.load_html(
+            "simple" => {
+                webview.load_html(
                 "<!doctype html><html><head><meta charset=\"utf-8\"><title>Codex Native</title><style>html,body{margin:0;background:#111;color:#f5f5f5;font:16px sans-serif}main{min-height:100vh;display:grid;place-items:center}</style></head><body><main><div><h1>Codex Native</h1><p>Wayland/WebKitGTK diagnostic page.</p></div></main></body></html>",
                 Some("codex://app/"),
             );
-        }
-        "file" => {
-            let index_uri = gio::File::for_path(web_root.join("index.html")).uri();
-            webview.load_uri(index_uri.as_str());
-        }
-        _ => {
-            let start_url = start_local_asset_server(web_root.clone())?;
-            eprintln!("native-shell: local asset server ready at {start_url}");
-            webview.load_uri(&start_url);
-        }
+            }
+            "file" => {
+                let index_uri = gio::File::for_path(web_root.join("index.html")).uri();
+                webview.load_uri(index_uri.as_str());
+            }
+            _ => {
+                let start_url = start_local_asset_server(web_root.clone())?;
+                eprintln!("native-shell: local asset server ready at {start_url}");
+                webview.load_uri(&start_url);
+            }
         }
     }
     eprintln!("native-shell: initial page requested (mode={start_mode})");
@@ -514,7 +509,10 @@ fn ensure_web_root(web_root: &Path) -> Result<(), String> {
 
     let index_path = web_root.join("index.html");
     if !index_path.is_file() {
-        return Err(format!("web root is missing index.html: {}", index_path.display()));
+        return Err(format!(
+            "web root is missing index.html: {}",
+            index_path.display()
+        ));
     }
 
     Ok(())
@@ -592,13 +590,13 @@ fn serve_asset(root: &Path, request_path: &str) -> Response<Cow<'static, [u8]>> 
     if file_path.file_name().and_then(|name| name.to_str()) == Some("index.html") {
         response = response.header(CONTENT_SECURITY_POLICY, "default-src 'self' codex: data: blob: https: 'unsafe-inline' 'unsafe-eval'; img-src 'self' codex: data: blob: https:; font-src 'self' codex: data:; media-src 'self' codex: data: blob:; connect-src 'self' codex: https://ab.chatgpt.com https://cdn.openai.com https://chatgpt.com;");
     }
-    response
-        .body(Cow::Owned(bytes))
-        .unwrap_or_else(|_| simple_response(
+    response.body(Cow::Owned(bytes)).unwrap_or_else(|_| {
+        simple_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "text/plain; charset=utf-8",
             Cow::Borrowed(b"response build failed"),
-        ))
+        )
+    })
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -714,7 +712,11 @@ fn handle_asset_http_connection(stream: TcpStream, root: Arc<PathBuf>) -> Result
             405,
             "Method Not Allowed",
             "text/plain; charset=utf-8",
-            if method == "HEAD" { &[] } else { b"method not allowed" },
+            if method == "HEAD" {
+                &[]
+            } else {
+                b"method not allowed"
+            },
         )?;
         return Ok(());
     }
@@ -737,11 +739,7 @@ fn handle_asset_http_connection(stream: TcpStream, root: Arc<PathBuf>) -> Result
             error.reason,
         ),
     };
-    let body = if method == "HEAD" {
-        Vec::new()
-    } else {
-        body
-    };
+    let body = if method == "HEAD" { Vec::new() } else { body };
     write_http_response(&mut stream, status, reason, mime, &body)?;
     Ok(())
 }
@@ -855,7 +853,9 @@ fn handle_view_message(
             if deleted {
                 persisted_atoms.borrow_mut().remove(&key);
             } else {
-                persisted_atoms.borrow_mut().insert(key.clone(), value.clone());
+                persisted_atoms
+                    .borrow_mut()
+                    .insert(key.clone(), value.clone());
             }
 
             dispatch_message_to_view(
@@ -880,13 +880,7 @@ fn handle_view_message(
             Ok(())
         }
         "fetch" => handle_fetch_request(webview, global_state, config_state, auth_state, payload),
-        "mcp-request" => handle_mcp_request(
-            webview,
-            config_state,
-            auth_state,
-            app_server,
-            payload,
-        ),
+        "mcp-request" => handle_mcp_request(webview, config_state, auth_state, app_server, payload),
         "mcp-response" => handle_mcp_response(app_server, payload),
         "thread-prewarm-start" => handle_app_server_request_passthrough(app_server, payload),
         _ => Ok(()),
@@ -938,7 +932,11 @@ fn handle_fetch_request(
         "vscode://codex/get-global-state" => {
             let key = body
                 .and_then(parse_json_body)
-                .and_then(|json| json.get("key").and_then(JsonValue::as_str).map(str::to_owned))
+                .and_then(|json| {
+                    json.get("key")
+                        .and_then(JsonValue::as_str)
+                        .map(str::to_owned)
+                })
                 .unwrap_or_default();
             let value = read_store_value_or_default(global_state, &key, default_global_state_value);
             dispatch_fetch_success(webview, request_id, json!({ "value": value }));
@@ -947,7 +945,11 @@ fn handle_fetch_request(
         "vscode://codex/get-configuration" => {
             let key = body
                 .and_then(parse_json_body)
-                .and_then(|json| json.get("key").and_then(JsonValue::as_str).map(str::to_owned))
+                .and_then(|json| {
+                    json.get("key")
+                        .and_then(JsonValue::as_str)
+                        .map(str::to_owned)
+                })
                 .unwrap_or_default();
             dispatch_fetch_success(
                 webview,
@@ -980,7 +982,9 @@ fn handle_fetch_request(
                 .and_then(JsonValue::as_str)
                 .ok_or("set-configuration is missing key")?;
             let value = json.get("value").cloned().unwrap_or(JsonValue::Null);
-            config_state.borrow_mut().insert(key.to_string(), value.clone());
+            config_state
+                .borrow_mut()
+                .insert(key.to_string(), value.clone());
             dispatch_fetch_success(webview, request_id, json!({ "ok": true, "value": value }));
             Ok(())
         }
@@ -1016,17 +1020,23 @@ fn handle_fetch_request(
             let existing_paths = body
                 .and_then(parse_json_body)
                 .and_then(|json| {
-                    json.get("paths").and_then(JsonValue::as_array).map(|paths| {
-                        paths
-                            .iter()
-                            .filter_map(JsonValue::as_str)
-                            .filter(|path| Path::new(path).exists())
-                            .map(str::to_owned)
-                            .collect::<Vec<_>>()
-                    })
+                    json.get("paths")
+                        .and_then(JsonValue::as_array)
+                        .map(|paths| {
+                            paths
+                                .iter()
+                                .filter_map(JsonValue::as_str)
+                                .filter(|path| Path::new(path).exists())
+                                .map(str::to_owned)
+                                .collect::<Vec<_>>()
+                        })
                 })
                 .unwrap_or_default();
-            dispatch_fetch_success(webview, request_id, json!({ "existingPaths": existing_paths }));
+            dispatch_fetch_success(
+                webview,
+                request_id,
+                json!({ "existingPaths": existing_paths }),
+            );
             Ok(())
         }
         "vscode://codex/read-file-binary" => {
@@ -1480,7 +1490,10 @@ fn handle_mcp_request(
 }
 
 #[cfg(target_os = "linux")]
-fn handle_mcp_response(app_server: Option<&AppServerBridge>, payload: &JsonValue) -> Result<(), String> {
+fn handle_mcp_response(
+    app_server: Option<&AppServerBridge>,
+    payload: &JsonValue,
+) -> Result<(), String> {
     let response = payload
         .get("response")
         .ok_or("mcp-response is missing response")?;
@@ -1510,15 +1523,11 @@ fn dispatch_message_to_view(webview: &WebView, payload: &JsonValue) {
         "window.dispatchEvent(new MessageEvent('message', {{ data: {} }}));",
         payload
     );
-    webview.run_javascript(
-        &script,
-        None::<&gio::Cancellable>,
-        |result| {
-            if let Err(error) = result {
-                eprintln!("native-shell: dispatch to view failed: {error}");
-            }
-        },
-    );
+    webview.run_javascript(&script, None::<&gio::Cancellable>, |result| {
+        if let Err(error) = result {
+            eprintln!("native-shell: dispatch to view failed: {error}");
+        }
+    });
 }
 
 #[cfg(target_os = "linux")]
@@ -1553,12 +1562,7 @@ fn dispatch_fetch_error(webview: &WebView, request_id: &str, status: u16, error:
 }
 
 #[cfg(target_os = "linux")]
-fn dispatch_mcp_success(
-    webview: &WebView,
-    host_id: &str,
-    request_id: &str,
-    value: JsonValue,
-) {
+fn dispatch_mcp_success(webview: &WebView, host_id: &str, request_id: &str, value: JsonValue) {
     dispatch_message_to_view(
         webview,
         &json!({
@@ -1573,12 +1577,7 @@ fn dispatch_mcp_success(
 }
 
 #[cfg(target_os = "linux")]
-fn dispatch_mcp_error(
-    webview: &WebView,
-    host_id: &str,
-    request_id: &str,
-    message: String,
-) {
+fn dispatch_mcp_error(webview: &WebView, host_id: &str, request_id: &str, message: String) {
     dispatch_message_to_view(
         webview,
         &json!({
@@ -1617,12 +1616,18 @@ fn read_local_file_binary(path: &str) -> Result<(String, &'static str), (u16, St
         };
         (
             status_code,
-            format!("failed to resolve file path {}: {error}", resolved_path.display()),
+            format!(
+                "failed to resolve file path {}: {error}",
+                resolved_path.display()
+            ),
         )
     })?;
 
     if !is_allowed_native_file_read(&canonical_path) {
-        return Err((403, format!("file access is not allowed: {}", canonical_path.display())));
+        return Err((
+            403,
+            format!("file access is not allowed: {}", canonical_path.display()),
+        ));
     }
 
     let bytes = fs::read(&canonical_path).map_err(|error| {
@@ -1647,7 +1652,9 @@ fn is_allowed_native_file_read(path: &Path) -> bool {
     let temp_dir = fs::canonicalize(std::env::temp_dir()).ok();
 
     cwd.as_ref().is_some_and(|root| path.starts_with(root))
-        || codex_home.as_ref().is_some_and(|root| path.starts_with(root))
+        || codex_home
+            .as_ref()
+            .is_some_and(|root| path.starts_with(root))
         || temp_dir.as_ref().is_some_and(|root| path.starts_with(root))
 }
 
@@ -1722,7 +1729,11 @@ fn read_workspace_directory_entries(request: JsonValue) -> Vec<JsonValue> {
 
             let entry_type = entry.file_type().ok()?;
             let path_string = path.to_string_lossy().to_string();
-            let kind = if entry_type.is_dir() { "directory" } else { "file" };
+            let kind = if entry_type.is_dir() {
+                "directory"
+            } else {
+                "file"
+            };
 
             Some(json!({
                 "name": name,
@@ -1734,8 +1745,14 @@ fn read_workspace_directory_entries(request: JsonValue) -> Vec<JsonValue> {
         .collect::<Vec<_>>();
 
     entries.sort_by(|left, right| {
-        let left_type = left.get("type").and_then(JsonValue::as_str).unwrap_or("file");
-        let right_type = right.get("type").and_then(JsonValue::as_str).unwrap_or("file");
+        let left_type = left
+            .get("type")
+            .and_then(JsonValue::as_str)
+            .unwrap_or("file");
+        let right_type = right
+            .get("type")
+            .and_then(JsonValue::as_str)
+            .unwrap_or("file");
         let left_name = left.get("name").and_then(JsonValue::as_str).unwrap_or("");
         let right_name = right.get("name").and_then(JsonValue::as_str).unwrap_or("");
 
@@ -1776,9 +1793,7 @@ fn read_store_value_or_default(
     }
 
     let value = default_fn(key);
-    store
-        .borrow_mut()
-        .insert(key.to_string(), value.clone());
+    store.borrow_mut().insert(key.to_string(), value.clone());
     value
 }
 
@@ -2114,11 +2129,7 @@ fn start_app_server_bridge(
                 }
             };
 
-            if message
-                .get("id")
-                .and_then(JsonValue::as_str)
-                == Some("native-shell:init")
-            {
+            if message.get("id").and_then(JsonValue::as_str) == Some("native-shell:init") {
                 if message.get("error").is_some() {
                     let _ = event_tx.send(AppServerBridgeEvent::Fatal(
                         message
@@ -2270,7 +2281,11 @@ fn read_local_auth_snapshot() -> LocalAuthSnapshot {
         let plan_type = id_token_claims
             .as_ref()
             .and_then(extract_chatgpt_plan_type)
-            .or_else(|| access_token_claims.as_ref().and_then(extract_chatgpt_plan_type));
+            .or_else(|| {
+                access_token_claims
+                    .as_ref()
+                    .and_then(extract_chatgpt_plan_type)
+            });
 
         if let Some(email) = email {
             return LocalAuthSnapshot {
@@ -2283,9 +2298,7 @@ fn read_local_auth_snapshot() -> LocalAuthSnapshot {
         }
     }
 
-    LocalAuthSnapshot {
-        account: None,
-    }
+    LocalAuthSnapshot { account: None }
 }
 
 #[cfg(target_os = "linux")]

@@ -82,6 +82,29 @@ WEBKIT_DISABLE_DMABUF_RENDERER=1 cargo run -p codex-native -- run-shell ./extrac
 
 If your setup does not need that environment override, you can run the same command without it.
 
+If you omit the `webview` path, `codex-native` will try these locations in order:
+
+- `CODEX_NATIVE_WEB_ROOT`
+- `../share/codex-native/webview` relative to the installed executable
+- `./extracted/app-asar/webview`
+- `/usr/share/codex-native/webview`
+- `/usr/local/share/codex-native/webview`
+
+That makes packaged installs simpler because the binary can find the installed frontend assets on its own.
+
+## Packaging
+
+An Arch-first package definition lives in [packaging/aur/PKGBUILD](/home/jade/CodexDesktop/packaging/aur/PKGBUILD). It does four things:
+
+- Builds the native Rust shell from this repository
+- Downloads the pinned official macOS Codex bundle
+- Extracts `app.asar` locally and installs the `webview` assets under `/usr/share/codex-native/webview`
+- Installs a desktop launcher and launcher icon for Linux
+
+The desktop launcher script is [packaging/aur/codex-native-launcher](/home/jade/CodexDesktop/packaging/aur/codex-native-launcher). On Wayland it defaults `WEBKIT_DISABLE_DMABUF_RENDERER=1`, because that has been the most reliable setup on Hyprland during testing.
+
+The Linux package icon is sourced from the extracted frontend asset in `webview/assets/app-*.png`. The upstream macOS bundle still declares `electron.icns` as its native app icon in `Contents/Info.plist`, but that icon is shipped outside `app.asar`.
+
 ## Notes
 
 - This project currently targets the native Linux use case first.
