@@ -893,23 +893,7 @@ fn handle_view_message(
 
             if let Some(root) = selected_root.as_deref() {
                 let roots = save_workspace_root(global_state, root);
-                let labels = workspace_root_labels(&roots);
-
-                dispatch_message_to_view(
-                    webview,
-                    &json!({
-                        "type": "active-workspace-roots-changed",
-                        "roots": roots,
-                    }),
-                );
-                dispatch_message_to_view(
-                    webview,
-                    &json!({
-                        "type": "workspace-root-options-changed",
-                        "roots": roots,
-                        "labels": labels,
-                    }),
-                );
+                dispatch_workspace_root_updates(webview, &roots);
             }
 
             dispatch_message_to_view(
@@ -934,23 +918,7 @@ fn handle_view_message(
             };
 
             let roots = save_workspace_root(global_state, &root);
-            let labels = workspace_root_labels(&roots);
-
-            dispatch_message_to_view(
-                webview,
-                &json!({
-                    "type": "active-workspace-roots-changed",
-                    "roots": roots,
-                }),
-            );
-            dispatch_message_to_view(
-                webview,
-                &json!({
-                    "type": "workspace-root-options-changed",
-                    "roots": roots,
-                    "labels": labels,
-                }),
-            );
+            dispatch_workspace_root_updates(webview, &roots);
             Ok(())
         }
         "workspace-root-option-picked" => {
@@ -961,23 +929,7 @@ fn handle_view_message(
             let selected_root = normalize_workspace_root(root)
                 .ok_or("workspace-root-option-picked requires an existing absolute path")?;
             let roots = save_workspace_root(global_state, &selected_root);
-            let labels = workspace_root_labels(&roots);
-
-            dispatch_message_to_view(
-                webview,
-                &json!({
-                    "type": "active-workspace-roots-changed",
-                    "roots": roots,
-                }),
-            );
-            dispatch_message_to_view(
-                webview,
-                &json!({
-                    "type": "workspace-root-options-changed",
-                    "roots": roots,
-                    "labels": labels,
-                }),
-            );
+            dispatch_workspace_root_updates(webview, &roots);
             Ok(())
         }
         "fetch" => handle_fetch_request(webview, global_state, config_state, auth_state, payload),
@@ -1646,6 +1598,45 @@ fn dispatch_message_to_view(webview: &WebView, payload: &JsonValue) {
 }
 
 #[cfg(target_os = "linux")]
+fn workspace_query_invalidation_payloads() -> [JsonValue; 2] {
+    [
+        json!({
+            "type": "query-cache-invalidate",
+            "queryKey": ["vscode", "active-workspace-roots"],
+        }),
+        json!({
+            "type": "query-cache-invalidate",
+            "queryKey": ["vscode", "workspace-root-options"],
+        }),
+    ]
+}
+
+#[cfg(target_os = "linux")]
+fn dispatch_workspace_root_updates(webview: &WebView, roots: &[String]) {
+    let labels = workspace_root_labels(roots);
+
+    dispatch_message_to_view(
+        webview,
+        &json!({
+            "type": "active-workspace-roots-changed",
+            "roots": roots,
+        }),
+    );
+    dispatch_message_to_view(
+        webview,
+        &json!({
+            "type": "workspace-root-options-changed",
+            "roots": roots,
+            "labels": labels,
+        }),
+    );
+
+    for payload in workspace_query_invalidation_payloads() {
+        dispatch_message_to_view(webview, &payload);
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn dispatch_fetch_success(webview: &WebView, request_id: &str, body: JsonValue) {
     dispatch_message_to_view(
         webview,
@@ -2184,7 +2175,10 @@ fn rewrite_app_server_request(global_state: &JsonMapState, request: &JsonValue) 
     }
 
     let mut rewritten = request.clone();
-    let Some(params) = rewritten.get_mut("params").and_then(JsonValue::as_object_mut) else {
+    let Some(params) = rewritten
+        .get_mut("params")
+        .and_then(JsonValue::as_object_mut)
+    else {
         return rewritten;
     };
 
@@ -2236,10 +2230,12 @@ fn rewrite_app_server_request(global_state: &JsonMapState, request: &JsonValue) 
             {
                 false
             } else {
-                normalized_roots.iter().all(|root| match home_root.as_deref() {
-                    Some(home_root) => root == home_root,
-                    None => root == &std::env::var("HOME").unwrap_or_default(),
-                })
+                normalized_roots
+                    .iter()
+                    .all(|root| match home_root.as_deref() {
+                        Some(home_root) => root == home_root,
+                        None => root == &std::env::var("HOME").unwrap_or_default(),
+                    })
             }
         }
         Some(_) => false,
@@ -2250,10 +2246,7 @@ fn rewrite_app_server_request(global_state: &JsonMapState, request: &JsonValue) 
             "native-shell: rewriting thread/start workspaceRoots to selected workspace root {}",
             workspace_root_target
         );
-        params.insert(
-            "workspaceRoots".to_string(),
-            json!([workspace_root_target]),
-        );
+        params.insert("workspaceRoots".to_string(), json!([workspace_root_target]));
     }
 
     rewritten
@@ -2936,5 +2929,25 @@ mod tests {
 
         let _ = fs::remove_dir_all(PathBuf::from(&selected_root));
         let _ = fs::remove_dir_all(PathBuf::from(&explicit_root));
+    }
+
+    #[test]
+    fn workspace_query_invalidation_payloads_target_workspace_queries() {
+        let payloads = workspace_query_invalidation_payloads();
+
+        assert_eq!(
+            payloads[0],
+            json!({
+                "type": "query-cache-invalidate",
+                "queryKey": ["vscode", "active-workspace-roots"],
+            })
+        );
+        assert_eq!(
+            payloads[1],
+            json!({
+                "type": "query-cache-invalidate",
+                "queryKey": ["vscode", "workspace-root-options"],
+            })
+        );
     }
 }
