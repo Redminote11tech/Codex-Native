@@ -17,7 +17,7 @@ use gio::prelude::FileExt;
 #[cfg(target_os = "linux")]
 use glib::Bytes;
 #[cfg(target_os = "linux")]
-use gtk::{Window, WindowType, prelude::*};
+use gtk::{FileChooserAction, FileChooserDialog, ResponseType, Window, WindowType, prelude::*};
 #[cfg(target_os = "linux")]
 use serde_json::{Value as JsonValue, json};
 
@@ -357,6 +357,7 @@ fn run_linux_gtk(web_root: PathBuf) -> Result<(), String> {
     };
     let webview_for_messages = webview.clone();
     let webview_for_app_server_events = webview.clone();
+    let window_for_messages = window.clone();
     let persisted_atoms_for_messages = persisted_atoms.clone();
     let global_state_for_messages = global_state.clone();
     let config_state_for_messages = config_state.clone();
@@ -376,6 +377,7 @@ fn run_linux_gtk(web_root: PathBuf) -> Result<(), String> {
             eprintln!("native-shell: js->host {payload}");
 
             if let Err(error) = handle_script_message(
+                &window_for_messages,
                 &webview_for_messages,
                 &persisted_atoms_for_messages,
                 &global_state_for_messages,
@@ -774,6 +776,7 @@ fn write_http_response(
 
 #[cfg(target_os = "linux")]
 fn handle_script_message(
+    window: &Window,
     webview: &WebView,
     persisted_atoms: &PersistedAtomState,
     global_state: &JsonMapState,
@@ -796,6 +799,7 @@ fn handle_script_message(
                 .get("payload")
                 .ok_or("message-from-view is missing payload")?;
             handle_view_message(
+                window,
                 webview,
                 persisted_atoms,
                 global_state,
@@ -811,6 +815,7 @@ fn handle_script_message(
 
 #[cfg(target_os = "linux")]
 fn handle_view_message(
+    window: &Window,
     webview: &WebView,
     persisted_atoms: &PersistedAtomState,
     global_state: &JsonMapState,
@@ -913,6 +918,37 @@ fn handle_view_message(
                     "type": "electron-onboarding-skip-workspace-result",
                     "success": selected_root.is_some(),
                     "root": selected_root,
+                }),
+            );
+            Ok(())
+        }
+        "electron-add-new-workspace-root-option" => {
+            let selected_root = payload
+                .get("root")
+                .and_then(JsonValue::as_str)
+                .and_then(normalize_workspace_root)
+                .or_else(|| prompt_for_workspace_root(window, global_state));
+
+            let Some(root) = selected_root else {
+                return Ok(());
+            };
+
+            let roots = save_workspace_root(global_state, &root);
+            let labels = workspace_root_labels(&roots);
+
+            dispatch_message_to_view(
+                webview,
+                &json!({
+                    "type": "active-workspace-roots-changed",
+                    "roots": roots,
+                }),
+            );
+            dispatch_message_to_view(
+                webview,
+                &json!({
+                    "type": "workspace-root-options-changed",
+                    "roots": roots,
+                    "labels": labels,
                 }),
             );
             Ok(())
@@ -2193,6 +2229,37 @@ fn preferred_workspace_root(global_state: &JsonMapState) -> Option<String> {
     }
 
     None
+}
+
+#[cfg(target_os = "linux")]
+fn prompt_for_workspace_root(window: &Window, global_state: &JsonMapState) -> Option<String> {
+    let dialog = FileChooserDialog::new(
+        Some("Select Project Folder"),
+        Some(window),
+        FileChooserAction::SelectFolder,
+    );
+    dialog.add_buttons(&[
+        ("Cancel", ResponseType::Cancel),
+        ("Open", ResponseType::Accept),
+    ]);
+    dialog.set_modal(true);
+
+    if let Some(current_root) = preferred_workspace_root(global_state) {
+        let _ = dialog.set_current_folder(current_root);
+    } else if let Some(home) = std::env::var_os("HOME") {
+        let _ = dialog.set_current_folder(PathBuf::from(home));
+    }
+
+    let response = dialog.run();
+    let selected_root = if response == ResponseType::Accept {
+        dialog
+            .filename()
+            .and_then(|path| path.to_str().and_then(normalize_workspace_root))
+    } else {
+        None
+    };
+    dialog.close();
+    selected_root
 }
 
 #[cfg(target_os = "linux")]
