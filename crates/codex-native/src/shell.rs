@@ -17,9 +17,9 @@ use gio::prelude::FileExt;
 #[cfg(target_os = "linux")]
 use glib::Bytes;
 #[cfg(target_os = "linux")]
-use gtk::{prelude::*, Window, WindowType};
+use gtk::{Window, WindowType, prelude::*};
 #[cfg(target_os = "linux")]
-use serde_json::{json, Value as JsonValue};
+use serde_json::{Value as JsonValue, json};
 
 #[cfg(not(target_os = "linux"))]
 use tao::dpi::LogicalSize;
@@ -39,11 +39,11 @@ use webkit2gtk::{
 };
 
 #[cfg(not(target_os = "linux"))]
+use wry::WebViewBuilder;
+#[cfg(not(target_os = "linux"))]
 use wry::http::header::{CONTENT_SECURITY_POLICY, CONTENT_TYPE};
 #[cfg(not(target_os = "linux"))]
 use wry::http::{Response, StatusCode};
-#[cfg(not(target_os = "linux"))]
-use wry::WebViewBuilder;
 
 const SHELL_INIT_SCRIPT: &str = r#"
 (() => {
@@ -189,6 +189,10 @@ type PersistedAtomState = Rc<RefCell<HashMap<String, JsonValue>>>;
 type JsonMapState = Rc<RefCell<HashMap<String, JsonValue>>>;
 #[cfg(target_os = "linux")]
 const DEFAULT_HOST_ID: &str = "local";
+#[cfg(target_os = "linux")]
+const WORKSPACE_ROOTS_STATE_KEY: &str = "native-workspace-roots";
+#[cfg(target_os = "linux")]
+const MAX_WORKSPACE_ROOTS: usize = 16;
 #[cfg(target_os = "linux")]
 #[derive(Default)]
 struct LocalAuthSnapshot {
@@ -879,6 +883,33 @@ fn handle_view_message(
             );
             Ok(())
         }
+        "workspace-root-option-picked" => {
+            let root = payload
+                .get("root")
+                .and_then(JsonValue::as_str)
+                .ok_or("workspace-root-option-picked is missing root")?;
+            let selected_root = normalize_workspace_root(root)
+                .ok_or("workspace-root-option-picked requires an existing absolute path")?;
+            let roots = save_workspace_root(global_state, &selected_root);
+            let labels = workspace_root_labels(&roots);
+
+            dispatch_message_to_view(
+                webview,
+                &json!({
+                    "type": "active-workspace-roots-changed",
+                    "roots": roots,
+                }),
+            );
+            dispatch_message_to_view(
+                webview,
+                &json!({
+                    "type": "workspace-root-options-changed",
+                    "roots": roots,
+                    "labels": labels,
+                }),
+            );
+            Ok(())
+        }
         "fetch" => handle_fetch_request(webview, global_state, config_state, auth_state, payload),
         "mcp-request" => handle_mcp_request(webview, config_state, auth_state, app_server, payload),
         "mcp-response" => handle_mcp_response(app_server, payload),
@@ -1001,18 +1032,19 @@ fn handle_fetch_request(
             Ok(())
         }
         "vscode://codex/active-workspace-roots" => {
-            dispatch_fetch_success(
-                webview,
-                request_id,
-                json!({ "roots": current_workspace_roots() }),
-            );
+            let roots = current_workspace_roots(global_state);
+            dispatch_fetch_success(webview, request_id, json!({ "roots": roots }));
             Ok(())
         }
         "vscode://codex/workspace-root-options" => {
+            let roots = current_workspace_roots(global_state);
             dispatch_fetch_success(
                 webview,
                 request_id,
-                json!({ "roots": current_workspace_roots() }),
+                json!({
+                    "roots": roots,
+                    "labels": workspace_root_labels(&roots),
+                }),
             );
             Ok(())
         }
@@ -1067,7 +1099,7 @@ fn handle_fetch_request(
         "vscode://codex/workspace-directory-entries" => {
             let entries = body
                 .and_then(parse_json_body)
-                .map(read_workspace_directory_entries)
+                .map(|request| read_workspace_directory_entries(global_state, request))
                 .unwrap_or_default();
             dispatch_fetch_success(webview, request_id, json!({ "entries": entries }));
             Ok(())
@@ -1687,12 +1719,20 @@ fn encode_base64(bytes: &[u8]) -> String {
 }
 
 #[cfg(target_os = "linux")]
-fn read_workspace_directory_entries(request: JsonValue) -> Vec<JsonValue> {
+fn read_workspace_directory_entries(
+    global_state: &JsonMapState,
+    request: JsonValue,
+) -> Vec<JsonValue> {
     let workspace_root = request
         .get("workspaceRoot")
         .and_then(JsonValue::as_str)
         .map(PathBuf::from)
-        .or_else(|| std::env::current_dir().ok());
+        .or_else(|| {
+            current_workspace_roots(global_state)
+                .into_iter()
+                .next()
+                .map(PathBuf::from)
+        });
     let include_hidden = request
         .get("includeHidden")
         .and_then(JsonValue::as_bool)
@@ -1977,6 +2017,7 @@ fn native_model_catalog() -> JsonValue {
 #[cfg(target_os = "linux")]
 fn default_global_state_value(key: &str) -> JsonValue {
     match key {
+        WORKSPACE_ROOTS_STATE_KEY => json!([]),
         "projectless-thread-ids" => json!([]),
         "thread-workspace-root-hints" => json!({}),
         "use-copilot-auth-if-available" => json!(false),
@@ -2011,12 +2052,80 @@ fn default_configuration_value(key: &str) -> JsonValue {
 }
 
 #[cfg(target_os = "linux")]
-fn current_workspace_roots() -> Vec<String> {
-    std::env::current_dir()
-        .ok()
-        .and_then(|path| path.to_str().map(str::to_owned))
-        .map(|path| vec![path])
+fn current_workspace_roots(global_state: &JsonMapState) -> Vec<String> {
+    global_state
+        .borrow()
+        .get(WORKSPACE_ROOTS_STATE_KEY)
+        .and_then(JsonValue::as_array)
+        .map(|roots| {
+            roots
+                .iter()
+                .filter_map(JsonValue::as_str)
+                .filter_map(normalize_workspace_root)
+                .fold(Vec::new(), |mut acc, root| {
+                    if !acc.contains(&root) {
+                        acc.push(root);
+                    }
+                    acc
+                })
+        })
         .unwrap_or_default()
+}
+
+#[cfg(target_os = "linux")]
+fn save_workspace_root(global_state: &JsonMapState, root: &str) -> Vec<String> {
+    let mut roots = current_workspace_roots(global_state);
+    roots.retain(|existing| existing != root);
+    roots.insert(0, root.to_string());
+    roots.truncate(MAX_WORKSPACE_ROOTS);
+    global_state
+        .borrow_mut()
+        .insert(WORKSPACE_ROOTS_STATE_KEY.to_string(), json!(roots.clone()));
+    roots
+}
+
+#[cfg(target_os = "linux")]
+fn workspace_root_labels(roots: &[String]) -> JsonValue {
+    JsonValue::Object(
+        roots
+            .iter()
+            .map(|root| {
+                let label = Path::new(root)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or(root);
+                (root.clone(), JsonValue::String(label.to_string()))
+            })
+            .collect(),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn normalize_workspace_root(root: &str) -> Option<String> {
+    let trimmed = root.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let expanded = if trimmed == "~" {
+        std::env::var_os("HOME").map(PathBuf::from)?
+    } else if let Some(suffix) = trimmed.strip_prefix("~/") {
+        let mut home = PathBuf::from(std::env::var_os("HOME")?);
+        home.push(suffix);
+        home
+    } else {
+        PathBuf::from(trimmed)
+    };
+
+    if !expanded.is_absolute() || !expanded.is_dir() {
+        return None;
+    }
+
+    fs::canonicalize(&expanded)
+        .ok()
+        .or(Some(expanded))
+        .and_then(|path| path.to_str().map(str::to_owned))
 }
 
 #[cfg(target_os = "linux")]
