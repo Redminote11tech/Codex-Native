@@ -2188,7 +2188,7 @@ fn rewrite_app_server_request(global_state: &JsonMapState, request: &JsonValue) 
         return rewritten;
     };
 
-    let should_override = match params.get("cwd").and_then(JsonValue::as_str) {
+    let should_override_cwd = match params.get("cwd").and_then(JsonValue::as_str) {
         None => true,
         Some(cwd) if cwd.trim().is_empty() => true,
         Some(cwd) => {
@@ -2200,12 +2200,60 @@ fn rewrite_app_server_request(global_state: &JsonMapState, request: &JsonValue) 
         }
     };
 
-    if should_override {
+    if should_override_cwd {
         eprintln!(
             "native-shell: rewriting thread/start cwd to selected workspace root {}",
             selected_root
         );
         params.insert("cwd".to_string(), json!(selected_root));
+    }
+
+    let workspace_root_target = if should_override_cwd {
+        selected_root.clone()
+    } else {
+        params
+            .get("cwd")
+            .and_then(JsonValue::as_str)
+            .and_then(normalize_workspace_root)
+            .unwrap_or_else(|| selected_root.clone())
+    };
+
+    let should_override_workspace_roots = match params.get("workspaceRoots") {
+        None => true,
+        Some(JsonValue::Array(roots)) if roots.is_empty() => true,
+        Some(JsonValue::Array(roots)) => {
+            let normalized_roots: Vec<String> = roots
+                .iter()
+                .filter_map(JsonValue::as_str)
+                .map(|root| normalize_workspace_root(root).unwrap_or_else(|| root.to_string()))
+                .collect();
+
+            if normalized_roots.is_empty() {
+                true
+            } else if normalized_roots
+                .iter()
+                .any(|root| root == &workspace_root_target)
+            {
+                false
+            } else {
+                normalized_roots.iter().all(|root| match home_root.as_deref() {
+                    Some(home_root) => root == home_root,
+                    None => root == &std::env::var("HOME").unwrap_or_default(),
+                })
+            }
+        }
+        Some(_) => false,
+    };
+
+    if should_override_workspace_roots {
+        eprintln!(
+            "native-shell: rewriting thread/start workspaceRoots to selected workspace root {}",
+            workspace_root_target
+        );
+        params.insert(
+            "workspaceRoots".to_string(),
+            json!([workspace_root_target]),
+        );
     }
 
     rewritten
@@ -2782,7 +2830,8 @@ mod tests {
             "id": "req-2",
             "method": "thread/start",
             "params": {
-                "cwd": home
+                "cwd": home,
+                "workspaceRoots": [std::env::var("HOME").expect("HOME should be set for shell tests")]
             }
         });
 
@@ -2792,6 +2841,15 @@ mod tests {
             rewritten
                 .get("params")
                 .and_then(|params| params.get("cwd"))
+                .and_then(JsonValue::as_str),
+            Some(selected_root.as_str())
+        );
+        assert_eq!(
+            rewritten
+                .get("params")
+                .and_then(|params| params.get("workspaceRoots"))
+                .and_then(JsonValue::as_array)
+                .and_then(|roots| roots.first())
                 .and_then(JsonValue::as_str),
             Some(selected_root.as_str())
         );
@@ -2826,6 +2884,52 @@ mod tests {
             rewritten
                 .get("params")
                 .and_then(|params| params.get("cwd"))
+                .and_then(JsonValue::as_str),
+            Some(explicit_root.as_str())
+        );
+        assert_eq!(
+            rewritten
+                .get("params")
+                .and_then(|params| params.get("workspaceRoots"))
+                .and_then(JsonValue::as_array)
+                .and_then(|roots| roots.first())
+                .and_then(JsonValue::as_str),
+            Some(explicit_root.as_str())
+        );
+
+        let _ = fs::remove_dir_all(PathBuf::from(&selected_root));
+        let _ = fs::remove_dir_all(PathBuf::from(&explicit_root));
+    }
+
+    #[test]
+    fn rewrite_thread_start_keeps_explicit_project_workspace_roots() {
+        let selected_root = temp_workspace_dir("rewrite-selected-workspace-root");
+        let selected_root = fs::canonicalize(&selected_root)
+            .expect("selected root should canonicalize")
+            .to_string_lossy()
+            .to_string();
+        let explicit_root = temp_workspace_dir("rewrite-explicit-workspace-root");
+        let explicit_root = fs::canonicalize(&explicit_root)
+            .expect("explicit root should canonicalize")
+            .to_string_lossy()
+            .to_string();
+        let global_state = test_global_state_with_workspace(&selected_root);
+        let request = json!({
+            "id": "req-4",
+            "method": "thread/start",
+            "params": {
+                "workspaceRoots": [explicit_root]
+            }
+        });
+
+        let rewritten = rewrite_app_server_request(&global_state, &request);
+
+        assert_eq!(
+            rewritten
+                .get("params")
+                .and_then(|params| params.get("workspaceRoots"))
+                .and_then(JsonValue::as_array)
+                .and_then(|roots| roots.first())
                 .and_then(JsonValue::as_str),
             Some(explicit_root.as_str())
         );
