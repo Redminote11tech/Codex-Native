@@ -12,6 +12,7 @@ pkgbase = codex-native-git
 	depends = gtk3
 	depends = webkit2gtk-4.1
 	depends = libsoup3
+	depends = openssl
 	optdepends = codex: Codex CLI backend bridge for chat, auth, and runtime integration
 	provides = codex-native
 	conflicts = codex-native
