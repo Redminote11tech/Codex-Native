@@ -144,7 +144,7 @@ The AUR repo is now prepared for separate automation as well. [.github/workflows
 
 The workflow writes a dedicated `~/.ssh/config` entry for `aur.archlinux.org` with `IdentitiesOnly yes`, so GitHub Actions always presents the intended AUR key instead of falling back to unrelated SSH identities.
 
-The sync is intentionally narrow. It publishes only the packaging files from [packaging/aur](/home/jade/CodexDesktop/packaging/aur) through [scripts/sync-aur-repo.sh](/home/jade/CodexDesktop/scripts/sync-aur-repo.sh), instead of mirroring the full source tree into AUR.
+The sync is intentionally narrow. It publishes only the packaging files from [packaging/aur](/home/jade/CodexDesktop/packaging/aur) through [scripts/sync-aur-repo.sh](/home/jade/CodexDesktop/scripts/sync-aur-repo.sh), instead of mirroring the full source tree into AUR. During sync, the script stamps the AUR repo with the current git-derived `pkgver` so AUR metadata does not fall back to the `r0.0` placeholder used in-source.
 
 ## Notes
 
