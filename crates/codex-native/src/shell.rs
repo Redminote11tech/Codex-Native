@@ -188,9 +188,17 @@ type PersistedAtomState = Rc<RefCell<HashMap<String, JsonValue>>>;
 #[cfg(target_os = "linux")]
 type JsonMapState = Rc<RefCell<HashMap<String, JsonValue>>>;
 #[cfg(target_os = "linux")]
+type SharedObjectState = Rc<RefCell<HashMap<String, JsonValue>>>;
+#[cfg(target_os = "linux")]
 const DEFAULT_HOST_ID: &str = "local";
 #[cfg(target_os = "linux")]
 const WORKSPACE_ROOTS_STATE_KEY: &str = "native-workspace-roots";
+#[cfg(target_os = "linux")]
+const ACTIVE_WORKSPACE_ROOTS_STATE_KEY: &str = "active-workspace-roots";
+#[cfg(target_os = "linux")]
+const WORKSPACE_ROOT_OPTIONS_STATE_KEY: &str = "workspace-root-options";
+#[cfg(target_os = "linux")]
+const WORKSPACE_ROOT_LABELS_STATE_KEY: &str = "workspace-root-labels";
 #[cfg(target_os = "linux")]
 const MAX_WORKSPACE_ROOTS: usize = 16;
 #[cfg(target_os = "linux")]
@@ -268,6 +276,19 @@ fn run_linux_gtk(web_root: PathBuf) -> Result<(), String> {
         web_root.display()
     );
 
+    let is_wayland = std::env::var_os("WAYLAND_DISPLAY").is_some()
+        || matches!(
+            std::env::var("XDG_SESSION_TYPE").ok().as_deref(),
+            Some("wayland")
+        );
+    if is_wayland && std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        // Safe here because this runs during process startup before any worker threads are spawned.
+        unsafe {
+            std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+        }
+        eprintln!("native-shell: enabled WEBKIT_DISABLE_DMABUF_RENDERER=1 for Wayland");
+    }
+
     gtk::init().map_err(|error| format!("failed to initialize gtk: {error}"))?;
     eprintln!("native-shell: gtk initialized");
 
@@ -276,7 +297,7 @@ fn run_linux_gtk(web_root: PathBuf) -> Result<(), String> {
     window.set_default_size(1440, 920);
     let use_client_decorations = std::env::var_os("CODEX_NATIVE_USE_CLIENT_DECORATIONS")
         .map(|value| value != "0")
-        .unwrap_or(true);
+        .unwrap_or(!is_wayland);
     window.set_decorated(!use_client_decorations);
     eprintln!("native-shell: window created (client_decorations={use_client_decorations})");
 
@@ -345,6 +366,7 @@ fn run_linux_gtk(web_root: PathBuf) -> Result<(), String> {
     let global_state: JsonMapState = Rc::new(RefCell::new(HashMap::new()));
     let config_state: JsonMapState = Rc::new(RefCell::new(HashMap::new()));
     let auth_state: JsonMapState = Rc::new(RefCell::new(HashMap::new()));
+    let shared_objects: SharedObjectState = Rc::new(RefCell::new(initial_shared_object_state()));
     #[allow(deprecated)]
     let (app_server_events_tx, app_server_events_rx) =
         glib::MainContext::channel::<AppServerBridgeEvent>(glib::Priority::default());
@@ -362,6 +384,7 @@ fn run_linux_gtk(web_root: PathBuf) -> Result<(), String> {
     let global_state_for_messages = global_state.clone();
     let config_state_for_messages = config_state.clone();
     let auth_state_for_messages = auth_state.clone();
+    let shared_objects_for_messages = shared_objects.clone();
     let app_server_for_messages = app_server.clone();
     app_server_events_rx.attach(None, move |event| {
         handle_app_server_event(&webview_for_app_server_events, event);
@@ -374,7 +397,6 @@ fn run_linux_gtk(web_root: PathBuf) -> Result<(), String> {
                 .js_value()
                 .map(|value| value.to_string().to_string())
                 .unwrap_or_else(|| "<unreadable script message>".to_string());
-            eprintln!("native-shell: js->host {payload}");
 
             if let Err(error) = handle_script_message(
                 &window_for_messages,
@@ -383,6 +405,7 @@ fn run_linux_gtk(web_root: PathBuf) -> Result<(), String> {
                 &global_state_for_messages,
                 &config_state_for_messages,
                 &auth_state_for_messages,
+                &shared_objects_for_messages,
                 app_server_for_messages.as_deref(),
                 &payload,
             ) {
@@ -392,7 +415,7 @@ fn run_linux_gtk(web_root: PathBuf) -> Result<(), String> {
     );
     let settings = WebViewExt::settings(&webview).ok_or("failed to access WebKit settings")?;
     settings.set_enable_developer_extras(true);
-    settings.set_enable_write_console_messages_to_stdout(true);
+    settings.set_enable_write_console_messages_to_stdout(false);
     webview.connect_load_changed(|_, event| {
         eprintln!("native-shell: load event {event:?}");
     });
@@ -782,6 +805,7 @@ fn handle_script_message(
     global_state: &JsonMapState,
     config_state: &JsonMapState,
     auth_state: &JsonMapState,
+    shared_objects: &SharedObjectState,
     app_server: Option<&AppServerBridge>,
     payload_text: &str,
 ) -> Result<(), String> {
@@ -805,6 +829,7 @@ fn handle_script_message(
                 global_state,
                 config_state,
                 auth_state,
+                shared_objects,
                 app_server,
                 payload,
             )
@@ -821,6 +846,7 @@ fn handle_view_message(
     global_state: &JsonMapState,
     config_state: &JsonMapState,
     auth_state: &JsonMapState,
+    shared_objects: &SharedObjectState,
     app_server: Option<&AppServerBridge>,
     payload: &JsonValue,
 ) -> Result<(), String> {
@@ -878,6 +904,35 @@ fn handle_view_message(
             );
             Ok(())
         }
+        "shared-object-subscribe" => {
+            let key = payload
+                .get("key")
+                .and_then(JsonValue::as_str)
+                .ok_or("shared-object-subscribe is missing key")?;
+            dispatch_shared_object_update(webview, shared_objects, key);
+            Ok(())
+        }
+        "shared-object-unsubscribe" => Ok(()),
+        "shared-object-set" => {
+            let key = payload
+                .get("key")
+                .and_then(JsonValue::as_str)
+                .ok_or("shared-object-set is missing key")?;
+            let value = payload.get("value").cloned().unwrap_or(JsonValue::Null);
+            shared_objects
+                .borrow_mut()
+                .insert(key.to_string(), value.clone());
+            dispatch_message_to_view(
+                webview,
+                &json!({
+                    "type": "shared-object-updated",
+                    "key": key,
+                    "value": value,
+                }),
+            );
+            Ok(())
+        }
+        "log-message" | "ready" | "view-focused" => Ok(()),
         "electron-window-focus-request" => {
             dispatch_message_to_view(
                 webview,
@@ -892,8 +947,13 @@ fn handle_view_message(
             let selected_root = preferred_workspace_root(global_state);
 
             if let Some(root) = selected_root.as_deref() {
-                let roots = save_workspace_root(global_state, root);
-                dispatch_workspace_root_updates(webview, &roots);
+                let state = select_workspace_root(global_state, root);
+                dispatch_workspace_root_updates(
+                    webview,
+                    &state.active_roots,
+                    &state.workspace_root_options,
+                    &state.labels,
+                );
             }
 
             dispatch_message_to_view(
@@ -917,8 +977,14 @@ fn handle_view_message(
                 return Ok(());
             };
 
-            let roots = save_workspace_root(global_state, &root);
-            dispatch_workspace_root_updates(webview, &roots);
+            let state = select_workspace_root(global_state, &root);
+            dispatch_workspace_root_updates(
+                webview,
+                &state.active_roots,
+                &state.workspace_root_options,
+                &state.labels,
+            );
+            dispatch_workspace_root_option_added(webview, &root);
             Ok(())
         }
         "workspace-root-option-picked" => {
@@ -928,8 +994,76 @@ fn handle_view_message(
                 .ok_or("workspace-root-option-picked is missing root")?;
             let selected_root = normalize_workspace_root(root)
                 .ok_or("workspace-root-option-picked requires an existing absolute path")?;
-            let roots = save_workspace_root(global_state, &selected_root);
-            dispatch_workspace_root_updates(webview, &roots);
+            let state = select_workspace_root(global_state, &selected_root);
+            dispatch_workspace_root_updates(
+                webview,
+                &state.active_roots,
+                &state.workspace_root_options,
+                &state.labels,
+            );
+            dispatch_workspace_root_option_added(webview, &selected_root);
+            Ok(())
+        }
+        "electron-set-active-workspace-root" => {
+            let root = payload
+                .get("root")
+                .and_then(JsonValue::as_str)
+                .ok_or("electron-set-active-workspace-root is missing root")?;
+            let selected_root = normalize_workspace_root(root)
+                .ok_or("electron-set-active-workspace-root requires an existing absolute path")?;
+            let state = select_workspace_root(global_state, &selected_root);
+            dispatch_workspace_root_updates(
+                webview,
+                &state.active_roots,
+                &state.workspace_root_options,
+                &state.labels,
+            );
+            Ok(())
+        }
+        "electron-clear-active-workspace-root" => {
+            let state = clear_active_workspace_roots(global_state);
+            dispatch_workspace_root_updates(
+                webview,
+                &state.active_roots,
+                &state.workspace_root_options,
+                &state.labels,
+            );
+            Ok(())
+        }
+        "electron-update-workspace-root-options" => {
+            let roots = payload
+                .get("roots")
+                .and_then(JsonValue::as_array)
+                .ok_or("electron-update-workspace-root-options is missing roots")?;
+            let normalized_roots: Vec<&str> = roots.iter().filter_map(JsonValue::as_str).collect();
+            let state = replace_workspace_root_options(global_state, &normalized_roots);
+            dispatch_workspace_root_updates(
+                webview,
+                &state.active_roots,
+                &state.workspace_root_options,
+                &state.labels,
+            );
+            Ok(())
+        }
+        "electron-rename-workspace-root-option" => {
+            let root = payload
+                .get("root")
+                .and_then(JsonValue::as_str)
+                .ok_or("electron-rename-workspace-root-option is missing root")?;
+            let label = payload
+                .get("label")
+                .and_then(JsonValue::as_str)
+                .unwrap_or_default();
+            let normalized_root = normalize_workspace_root(root).ok_or(
+                "electron-rename-workspace-root-option requires an existing absolute path",
+            )?;
+            let state = rename_workspace_root_option(global_state, &normalized_root, label);
+            dispatch_workspace_root_updates(
+                webview,
+                &state.active_roots,
+                &state.workspace_root_options,
+                &state.labels,
+            );
             Ok(())
         }
         "fetch" => handle_fetch_request(webview, global_state, config_state, auth_state, payload),
@@ -942,9 +1076,7 @@ fn handle_view_message(
             payload,
         ),
         "mcp-response" => handle_mcp_response(app_server, payload),
-        "thread-prewarm-start" => {
-            handle_app_server_request_passthrough(global_state, app_server, payload)
-        }
+        "thread-prewarm-start" => handle_thread_prewarm_start(webview, payload),
         _ => Ok(()),
     }
 }
@@ -1063,18 +1195,18 @@ fn handle_fetch_request(
             Ok(())
         }
         "vscode://codex/active-workspace-roots" => {
-            let roots = current_workspace_roots(global_state);
+            let roots = current_active_workspace_roots(global_state);
             dispatch_fetch_success(webview, request_id, json!({ "roots": roots }));
             Ok(())
         }
         "vscode://codex/workspace-root-options" => {
-            let roots = current_workspace_roots(global_state);
+            let roots = current_workspace_root_options(global_state);
             dispatch_fetch_success(
                 webview,
                 request_id,
                 json!({
                     "roots": roots,
-                    "labels": workspace_root_labels(&roots),
+                    "labels": current_workspace_root_labels(global_state, &roots),
                 }),
             );
             Ok(())
@@ -1569,18 +1701,32 @@ fn handle_mcp_response(
 }
 
 #[cfg(target_os = "linux")]
-fn handle_app_server_request_passthrough(
-    global_state: &JsonMapState,
-    app_server: Option<&AppServerBridge>,
-    payload: &JsonValue,
-) -> Result<(), String> {
-    let request = payload
+fn handle_thread_prewarm_start(webview: &WebView, payload: &JsonValue) -> Result<(), String> {
+    let host_id = payload
+        .get("hostId")
+        .and_then(JsonValue::as_str)
+        .unwrap_or(DEFAULT_HOST_ID);
+    let request_id = payload
         .get("request")
-        .ok_or("app-server passthrough is missing request")?;
-    if let Some(app_server) = app_server {
-        let request = rewrite_app_server_request(global_state, request);
-        app_server.send_json(&request)?;
-    }
+        .and_then(|request| request.get("id"))
+        .and_then(JsonValue::as_str)
+        .ok_or("thread-prewarm-start is missing request.id")?;
+
+    dispatch_message_to_view(
+        webview,
+        &json!({
+            "type": "mcp-response",
+            "hostId": host_id,
+            "message": {
+                "id": request_id,
+                "error": {
+                    "code": -32001,
+                    "message": "thread prewarming is disabled in Codex Native to avoid stale workspace reuse",
+                },
+            },
+        }),
+    );
+
     Ok(())
 }
 
@@ -1598,6 +1744,23 @@ fn dispatch_message_to_view(webview: &WebView, payload: &JsonValue) {
 }
 
 #[cfg(target_os = "linux")]
+fn dispatch_shared_object_update(webview: &WebView, shared_objects: &SharedObjectState, key: &str) {
+    let value = shared_objects
+        .borrow()
+        .get(key)
+        .cloned()
+        .unwrap_or(JsonValue::Null);
+    dispatch_message_to_view(
+        webview,
+        &json!({
+            "type": "shared-object-updated",
+            "key": key,
+            "value": value,
+        }),
+    );
+}
+
+#[cfg(target_os = "linux")]
 fn workspace_query_invalidation_payloads() -> [JsonValue; 2] {
     [
         json!({
@@ -1612,28 +1775,53 @@ fn workspace_query_invalidation_payloads() -> [JsonValue; 2] {
 }
 
 #[cfg(target_os = "linux")]
-fn dispatch_workspace_root_updates(webview: &WebView, roots: &[String]) {
-    let labels = workspace_root_labels(roots);
+fn dispatch_workspace_root_updates(
+    webview: &WebView,
+    active_roots: &[String],
+    roots: &[String],
+    labels: &JsonValue,
+) {
+    for message_type in [
+        "active-workspace-roots-changed",
+        "active-workspace-roots-updated",
+    ] {
+        dispatch_message_to_view(
+            webview,
+            &json!({
+                "type": message_type,
+                "roots": active_roots,
+            }),
+        );
+    }
 
-    dispatch_message_to_view(
-        webview,
-        &json!({
-            "type": "active-workspace-roots-changed",
-            "roots": roots,
-        }),
-    );
-    dispatch_message_to_view(
-        webview,
-        &json!({
-            "type": "workspace-root-options-changed",
-            "roots": roots,
-            "labels": labels,
-        }),
-    );
+    for message_type in [
+        "workspace-root-options-changed",
+        "workspace-root-options-updated",
+    ] {
+        dispatch_message_to_view(
+            webview,
+            &json!({
+                "type": message_type,
+                "roots": roots,
+                "labels": labels,
+            }),
+        );
+    }
 
     for payload in workspace_query_invalidation_payloads() {
         dispatch_message_to_view(webview, &payload);
     }
+}
+
+#[cfg(target_os = "linux")]
+fn dispatch_workspace_root_option_added(webview: &WebView, root: &str) {
+    dispatch_message_to_view(
+        webview,
+        &json!({
+            "type": "workspace-root-option-added",
+            "root": root,
+        }),
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -1802,7 +1990,7 @@ fn read_workspace_directory_entries(
         .and_then(JsonValue::as_str)
         .map(PathBuf::from)
         .or_else(|| {
-            current_workspace_roots(global_state)
+            current_active_workspace_roots(global_state)
                 .into_iter()
                 .next()
                 .map(PathBuf::from)
@@ -2092,6 +2280,9 @@ fn native_model_catalog() -> JsonValue {
 fn default_global_state_value(key: &str) -> JsonValue {
     match key {
         WORKSPACE_ROOTS_STATE_KEY => json!([]),
+        ACTIVE_WORKSPACE_ROOTS_STATE_KEY => json!([]),
+        WORKSPACE_ROOT_OPTIONS_STATE_KEY => json!([]),
+        WORKSPACE_ROOT_LABELS_STATE_KEY => json!({}),
         "projectless-thread-ids" => json!([]),
         "thread-workspace-root-hints" => json!({}),
         "use-copilot-auth-if-available" => json!(false),
@@ -2126,10 +2317,31 @@ fn default_configuration_value(key: &str) -> JsonValue {
 }
 
 #[cfg(target_os = "linux")]
-fn current_workspace_roots(global_state: &JsonMapState) -> Vec<String> {
-    global_state
-        .borrow()
-        .get(WORKSPACE_ROOTS_STATE_KEY)
+fn initial_shared_object_state() -> HashMap<String, JsonValue> {
+    HashMap::from([
+        (
+            "host_config".to_string(),
+            json!({
+                "id": DEFAULT_HOST_ID,
+                "display_name": "Local",
+                "kind": "local",
+            }),
+        ),
+        ("remote_connections".to_string(), json!([])),
+        ("remote_control_connections".to_string(), json!([])),
+        (
+            "remote_control_connections_state".to_string(),
+            json!({
+                "available": false,
+                "authRequired": false,
+            }),
+        ),
+    ])
+}
+
+#[cfg(target_os = "linux")]
+fn normalized_workspace_root_list(value: Option<&JsonValue>) -> Vec<String> {
+    value
         .and_then(JsonValue::as_array)
         .map(|roots| {
             roots
@@ -2147,8 +2359,67 @@ fn current_workspace_roots(global_state: &JsonMapState) -> Vec<String> {
 }
 
 #[cfg(target_os = "linux")]
+fn current_workspace_root_options(global_state: &JsonMapState) -> Vec<String> {
+    let state = global_state.borrow();
+    let options = state
+        .get(WORKSPACE_ROOT_OPTIONS_STATE_KEY)
+        .or_else(|| state.get(WORKSPACE_ROOTS_STATE_KEY));
+    normalized_workspace_root_list(options)
+}
+
+#[cfg(target_os = "linux")]
+fn current_active_workspace_roots(global_state: &JsonMapState) -> Vec<String> {
+    let state = global_state.borrow();
+    if let Some(active_roots) = state.get(ACTIVE_WORKSPACE_ROOTS_STATE_KEY) {
+        return normalized_workspace_root_list(Some(active_roots));
+    }
+
+    let fallback = state
+        .get(WORKSPACE_ROOT_OPTIONS_STATE_KEY)
+        .or_else(|| state.get(WORKSPACE_ROOTS_STATE_KEY));
+    normalized_workspace_root_list(fallback)
+        .into_iter()
+        .take(1)
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
 fn selected_workspace_root(global_state: &JsonMapState) -> Option<String> {
-    current_workspace_roots(global_state).into_iter().next()
+    current_active_workspace_roots(global_state)
+        .into_iter()
+        .next()
+}
+
+#[cfg(target_os = "linux")]
+fn current_workspace_root_labels(global_state: &JsonMapState, roots: &[String]) -> JsonValue {
+    let labels = global_state
+        .borrow()
+        .get(WORKSPACE_ROOT_LABELS_STATE_KEY)
+        .and_then(JsonValue::as_object)
+        .cloned()
+        .unwrap_or_default();
+
+    JsonValue::Object(
+        roots
+            .iter()
+            .map(|root| {
+                let label = labels
+                    .get(root)
+                    .and_then(JsonValue::as_str)
+                    .filter(|label| !label.trim().is_empty())
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| {
+                        Path::new(root)
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .filter(|name| !name.is_empty())
+                            .unwrap_or(root)
+                            .to_string()
+                    });
+                (root.clone(), JsonValue::String(label))
+            })
+            .collect(),
+    )
 }
 
 #[cfg(target_os = "linux")]
@@ -2253,31 +2524,122 @@ fn rewrite_app_server_request(global_state: &JsonMapState, request: &JsonValue) 
 }
 
 #[cfg(target_os = "linux")]
-fn save_workspace_root(global_state: &JsonMapState, root: &str) -> Vec<String> {
-    let mut roots = current_workspace_roots(global_state);
-    roots.retain(|existing| existing != root);
-    roots.insert(0, root.to_string());
-    roots.truncate(MAX_WORKSPACE_ROOTS);
-    global_state
-        .borrow_mut()
-        .insert(WORKSPACE_ROOTS_STATE_KEY.to_string(), json!(roots.clone()));
-    roots
+struct WorkspaceRootState {
+    active_roots: Vec<String>,
+    workspace_root_options: Vec<String>,
+    labels: JsonValue,
 }
 
 #[cfg(target_os = "linux")]
-fn workspace_root_labels(roots: &[String]) -> JsonValue {
-    JsonValue::Object(
-        roots
+fn write_workspace_root_state(
+    global_state: &JsonMapState,
+    active_roots: Vec<String>,
+    workspace_root_options: Vec<String>,
+) -> WorkspaceRootState {
+    let mut labels = global_state
+        .borrow()
+        .get(WORKSPACE_ROOT_LABELS_STATE_KEY)
+        .and_then(JsonValue::as_object)
+        .cloned()
+        .unwrap_or_default();
+    labels.retain(|root, _| {
+        workspace_root_options
             .iter()
-            .map(|root| {
-                let label = Path::new(root)
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .filter(|name| !name.is_empty())
-                    .unwrap_or(root);
-                (root.clone(), JsonValue::String(label.to_string()))
-            })
-            .collect(),
+            .any(|candidate| candidate == root)
+    });
+
+    {
+        let mut state = global_state.borrow_mut();
+        state.insert(
+            ACTIVE_WORKSPACE_ROOTS_STATE_KEY.to_string(),
+            json!(active_roots.clone()),
+        );
+        state.insert(
+            WORKSPACE_ROOT_OPTIONS_STATE_KEY.to_string(),
+            json!(workspace_root_options.clone()),
+        );
+        state.insert(
+            WORKSPACE_ROOTS_STATE_KEY.to_string(),
+            json!(workspace_root_options.clone()),
+        );
+        state.insert(
+            WORKSPACE_ROOT_LABELS_STATE_KEY.to_string(),
+            JsonValue::Object(labels),
+        );
+    }
+
+    WorkspaceRootState {
+        active_roots,
+        labels: current_workspace_root_labels(global_state, &workspace_root_options),
+        workspace_root_options,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn select_workspace_root(global_state: &JsonMapState, root: &str) -> WorkspaceRootState {
+    let mut roots = current_workspace_root_options(global_state);
+    roots.retain(|existing| existing != root);
+    roots.insert(0, root.to_string());
+    roots.truncate(MAX_WORKSPACE_ROOTS);
+    write_workspace_root_state(global_state, vec![root.to_string()], roots)
+}
+
+#[cfg(target_os = "linux")]
+fn clear_active_workspace_roots(global_state: &JsonMapState) -> WorkspaceRootState {
+    let roots = current_workspace_root_options(global_state);
+    write_workspace_root_state(global_state, Vec::new(), roots)
+}
+
+#[cfg(target_os = "linux")]
+fn replace_workspace_root_options(
+    global_state: &JsonMapState,
+    roots: &[&str],
+) -> WorkspaceRootState {
+    let mut normalized_roots = Vec::new();
+    for root in roots {
+        if let Some(root) = normalize_workspace_root(root) {
+            if !normalized_roots.contains(&root) {
+                normalized_roots.push(root);
+            }
+        }
+    }
+    normalized_roots.truncate(MAX_WORKSPACE_ROOTS);
+
+    let active_roots = current_active_workspace_roots(global_state)
+        .into_iter()
+        .filter(|root| normalized_roots.iter().any(|candidate| candidate == root))
+        .collect();
+
+    write_workspace_root_state(global_state, active_roots, normalized_roots)
+}
+
+#[cfg(target_os = "linux")]
+fn rename_workspace_root_option(
+    global_state: &JsonMapState,
+    root: &str,
+    label: &str,
+) -> WorkspaceRootState {
+    if current_workspace_root_options(global_state)
+        .iter()
+        .any(|existing| existing == root)
+    {
+        let mut state = global_state.borrow_mut();
+        let labels = state
+            .entry(WORKSPACE_ROOT_LABELS_STATE_KEY.to_string())
+            .or_insert_with(|| json!({}));
+        if let Some(labels) = labels.as_object_mut() {
+            if label.trim().is_empty() {
+                labels.remove(root);
+            } else {
+                labels.insert(root.to_string(), json!(label.trim()));
+            }
+        }
+    }
+
+    write_workspace_root_state(
+        global_state,
+        current_active_workspace_roots(global_state),
+        current_workspace_root_options(global_state),
     )
 }
 
@@ -2310,7 +2672,10 @@ fn normalize_workspace_root(root: &str) -> Option<String> {
 
 #[cfg(target_os = "linux")]
 fn preferred_workspace_root(global_state: &JsonMapState) -> Option<String> {
-    if let Some(root) = current_workspace_roots(global_state).into_iter().next() {
+    if let Some(root) = current_workspace_root_options(global_state)
+        .into_iter()
+        .next()
+    {
         return Some(root);
     }
 
@@ -2768,6 +3133,14 @@ mod tests {
             WORKSPACE_ROOTS_STATE_KEY.to_string(),
             json!([root.to_string()]),
         );
+        state.borrow_mut().insert(
+            WORKSPACE_ROOT_OPTIONS_STATE_KEY.to_string(),
+            json!([root.to_string()]),
+        );
+        state.borrow_mut().insert(
+            ACTIVE_WORKSPACE_ROOTS_STATE_KEY.to_string(),
+            json!([root.to_string()]),
+        );
         state
     }
 
@@ -2949,5 +3322,45 @@ mod tests {
                 "queryKey": ["vscode", "workspace-root-options"],
             })
         );
+    }
+
+    #[test]
+    fn clearing_active_workspace_keeps_saved_workspace_options() {
+        let first_root = temp_workspace_dir("workspace-state-first");
+        let first_root = fs::canonicalize(&first_root)
+            .expect("first root should canonicalize")
+            .to_string_lossy()
+            .to_string();
+        let second_root = temp_workspace_dir("workspace-state-second");
+        let second_root = fs::canonicalize(&second_root)
+            .expect("second root should canonicalize")
+            .to_string_lossy()
+            .to_string();
+        let global_state = test_global_state_with_workspace(&first_root);
+
+        let selected_state = select_workspace_root(&global_state, &second_root);
+        assert_eq!(selected_state.active_roots, vec![second_root.clone()]);
+        assert_eq!(
+            selected_state.workspace_root_options,
+            vec![second_root.clone(), first_root.clone()]
+        );
+
+        let cleared_state = clear_active_workspace_roots(&global_state);
+        assert!(cleared_state.active_roots.is_empty());
+        assert_eq!(
+            cleared_state.workspace_root_options,
+            vec![second_root.clone(), first_root.clone()]
+        );
+        assert_eq!(
+            current_active_workspace_roots(&global_state),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            current_workspace_root_options(&global_state),
+            vec![second_root.clone(), first_root.clone()]
+        );
+
+        let _ = fs::remove_dir_all(PathBuf::from(&first_root));
+        let _ = fs::remove_dir_all(PathBuf::from(&second_root));
     }
 }
