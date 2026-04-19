@@ -19,6 +19,10 @@ use glib::Bytes;
 #[cfg(target_os = "linux")]
 use gtk::{FileChooserAction, FileChooserDialog, ResponseType, Window, WindowType, prelude::*};
 #[cfg(target_os = "linux")]
+use reqwest::Method;
+#[cfg(target_os = "linux")]
+use reqwest::blocking::Client;
+#[cfg(target_os = "linux")]
 use serde_json::{Value as JsonValue, json};
 
 #[cfg(not(target_os = "linux"))]
@@ -202,6 +206,14 @@ const WORKSPACE_ROOT_LABELS_STATE_KEY: &str = "workspace-root-labels";
 #[cfg(target_os = "linux")]
 const MAX_WORKSPACE_ROOTS: usize = 16;
 #[cfg(target_os = "linux")]
+const EXPERIMENTAL_FEATURE_ENABLEMENT_STATE_KEY: &str = "native-experimental-feature-enablement";
+#[cfg(target_os = "linux")]
+const STATSIG_DEFAULT_ENABLE_FEATURES_ATOM_KEY: &str = "statsig_default_enable_features";
+#[cfg(target_os = "linux")]
+const AVATAR_OVERLAY_GATE_KEY: &str = "2679188970";
+#[cfg(target_os = "linux")]
+const HEARTBEAT_AUTOMATIONS_GATE_KEY: &str = "1488233300";
+#[cfg(target_os = "linux")]
 #[derive(Default)]
 struct LocalAuthSnapshot {
     account: Option<JsonValue>,
@@ -362,7 +374,8 @@ fn run_linux_gtk(web_root: PathBuf) -> Result<(), String> {
 
     let webview =
         WebView::new_with_context_and_user_content_manager(&context, &user_content_manager);
-    let persisted_atoms: PersistedAtomState = Rc::new(RefCell::new(HashMap::new()));
+    let persisted_atoms: PersistedAtomState =
+        Rc::new(RefCell::new(initial_persisted_atom_state()));
     let global_state: JsonMapState = Rc::new(RefCell::new(HashMap::new()));
     let config_state: JsonMapState = Rc::new(RefCell::new(HashMap::new()));
     let auth_state: JsonMapState = Rc::new(RefCell::new(HashMap::new()));
@@ -1097,11 +1110,26 @@ fn handle_fetch_request(
         .get("url")
         .and_then(JsonValue::as_str)
         .ok_or("fetch request is missing url")?;
+    let method = payload
+        .get("method")
+        .and_then(JsonValue::as_str)
+        .unwrap_or("GET");
     let body = payload.get("body").and_then(JsonValue::as_str);
+    let headers = parse_fetch_headers(payload);
 
     match url {
         url if is_statsig_initialize_url(url) => {
-            dispatch_fetch_success(webview, request_id, json!({ "has_updates": false }));
+            match forward_statsig_initialize_request(url, method, &headers, body) {
+                Ok(body) => dispatch_fetch_success(webview, request_id, body),
+                Err(error) => {
+                    eprintln!("native-shell: statsig initialize failed, using fallback: {error}");
+                    dispatch_fetch_success(
+                        webview,
+                        request_id,
+                        default_statsig_initialize_response(),
+                    );
+                }
+            }
             Ok(())
         }
         url if is_statsig_events_url(url) || is_statsig_exception_url(url) => {
@@ -1643,18 +1671,25 @@ fn handle_mcp_request(
             Ok(())
         }
         "experimentalFeature/list" => {
+            let data = experimental_feature_list(global_state, host_id);
             dispatch_mcp_success(
                 webview,
                 host_id,
                 request_id,
                 json!({
-                    "data": [],
+                    "data": data,
                     "nextCursor": null,
                 }),
             );
             Ok(())
         }
         "experimentalFeature/enablement/set" => {
+            let params = request.get("params").cloned().unwrap_or(JsonValue::Null);
+            let enablement = params
+                .get("enablement")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            write_experimental_feature_enablement(global_state, host_id, enablement);
             dispatch_mcp_success(webview, host_id, request_id, json!({}));
             Ok(())
         }
@@ -2082,6 +2117,152 @@ fn is_statsig_events_url(url: &str) -> bool {
 #[cfg(target_os = "linux")]
 fn is_statsig_exception_url(url: &str) -> bool {
     url.starts_with("https://statsigapi.net/v1/sdk_exception")
+}
+
+#[cfg(target_os = "linux")]
+fn parse_fetch_headers(payload: &JsonValue) -> Vec<(String, String)> {
+    payload
+        .get("headers")
+        .and_then(JsonValue::as_object)
+        .map(|headers| {
+            headers
+                .iter()
+                .filter_map(|(key, value)| {
+                    value
+                        .as_str()
+                        .map(|value| (key.to_ascii_lowercase(), value.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(target_os = "linux")]
+fn forward_statsig_initialize_request(
+    url: &str,
+    method: &str,
+    headers: &[(String, String)],
+    body: Option<&str>,
+) -> Result<JsonValue, String> {
+    let method = Method::from_bytes(method.as_bytes())
+        .map_err(|error| format!("invalid statsig method {method}: {error}"))?;
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|error| format!("failed to build statsig client: {error}"))?;
+    let mut request = client.request(method, url);
+
+    for (key, value) in headers {
+        if key == "host" || key == "content-length" || key == "x-codex-base64" {
+            continue;
+        }
+        request = request.header(key, value);
+    }
+
+    if let Some(body) = body {
+        request = request.body(body.to_string());
+    }
+
+    let response = request
+        .send()
+        .map_err(|error| format!("statsig request failed: {error}"))?;
+    let status = response.status();
+
+    if status == reqwest::StatusCode::NO_CONTENT {
+        return Ok(default_statsig_initialize_response());
+    }
+
+    if !status.is_success() {
+        return Err(format!("statsig initialize returned status {status}"));
+    }
+
+    response
+        .json::<JsonValue>()
+        .map_err(|error| format!("failed to parse statsig json response: {error}"))
+}
+
+#[cfg(target_os = "linux")]
+fn default_statsig_initialize_response() -> JsonValue {
+    json!({
+        "has_updates": false,
+        "data": {
+            "user": {
+                "userID": null,
+                "customIDs": {},
+                "custom": {
+                    "origin": "codex_vscode",
+                }
+            },
+            "feature_gates": {},
+            "dynamic_configs": {},
+            "layer_configs": {},
+            "sdkParams": {},
+            "time": 0
+        }
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn default_statsig_feature_overrides() -> JsonValue {
+    json!({
+        AVATAR_OVERLAY_GATE_KEY: true,
+        HEARTBEAT_AUTOMATIONS_GATE_KEY: true,
+        "apps": true,
+        "memories": true,
+        "plugins": true,
+        "tool_search": true,
+        "tool_suggest": true,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn initial_persisted_atom_state() -> HashMap<String, JsonValue> {
+    HashMap::from([(
+        STATSIG_DEFAULT_ENABLE_FEATURES_ATOM_KEY.to_string(),
+        default_statsig_feature_overrides(),
+    )])
+}
+
+#[cfg(target_os = "linux")]
+fn write_experimental_feature_enablement(
+    global_state: &JsonMapState,
+    host_id: &str,
+    enablement: JsonValue,
+) {
+    let mut state = global_state.borrow_mut();
+    let store = state
+        .entry(EXPERIMENTAL_FEATURE_ENABLEMENT_STATE_KEY.to_string())
+        .or_insert_with(|| json!({}));
+
+    if !store.is_object() {
+        *store = json!({});
+    }
+
+    if let Some(object) = store.as_object_mut() {
+        object.insert(host_id.to_string(), enablement);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn experimental_feature_list(global_state: &JsonMapState, host_id: &str) -> Vec<JsonValue> {
+    global_state
+        .borrow()
+        .get(EXPERIMENTAL_FEATURE_ENABLEMENT_STATE_KEY)
+        .and_then(JsonValue::as_object)
+        .and_then(|hosts| hosts.get(host_id))
+        .and_then(JsonValue::as_object)
+        .map(|enablement| {
+            enablement
+                .iter()
+                .map(|(key, value)| {
+                    json!({
+                        "id": key,
+                        "enabled": value.as_bool().unwrap_or(false),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(target_os = "linux")]
@@ -3362,5 +3543,57 @@ mod tests {
 
         let _ = fs::remove_dir_all(PathBuf::from(&first_root));
         let _ = fs::remove_dir_all(PathBuf::from(&second_root));
+    }
+
+    #[test]
+    fn initial_persisted_atoms_seed_statsig_feature_overrides() {
+        let state = initial_persisted_atom_state();
+        let overrides = state
+            .get(STATSIG_DEFAULT_ENABLE_FEATURES_ATOM_KEY)
+            .and_then(JsonValue::as_object)
+            .expect("statsig overrides should exist");
+
+        assert_eq!(
+            overrides.get(AVATAR_OVERLAY_GATE_KEY).and_then(JsonValue::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            overrides
+                .get(HEARTBEAT_AUTOMATIONS_GATE_KEY)
+                .and_then(JsonValue::as_bool),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn experimental_feature_enablement_is_stored_per_host() {
+        let state: JsonMapState = Rc::new(RefCell::new(HashMap::new()));
+
+        write_experimental_feature_enablement(
+            &state,
+            "local",
+            json!({
+                "plugins": true,
+                "tool_search": false,
+            }),
+        );
+
+        let features = experimental_feature_list(&state, "local");
+        let mut by_id = HashMap::new();
+        for feature in features {
+            let id = feature
+                .get("id")
+                .and_then(JsonValue::as_str)
+                .expect("feature id should be a string")
+                .to_string();
+            let enabled = feature
+                .get("enabled")
+                .and_then(JsonValue::as_bool)
+                .expect("feature enabled should be a bool");
+            by_id.insert(id, enabled);
+        }
+
+        assert_eq!(by_id.get("plugins"), Some(&true));
+        assert_eq!(by_id.get("tool_search"), Some(&false));
     }
 }
