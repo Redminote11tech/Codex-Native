@@ -105,6 +105,43 @@ The desktop launcher script is [packaging/aur/codex-native-launcher](/home/jade/
 
 The Linux package icon is sourced from the extracted frontend asset in `webview/assets/app-*.png`. The upstream macOS bundle still declares `electron.icns` as its native app icon in `Contents/Info.plist`, but that icon is shipped outside `app.asar`.
 
+## Tracking Upstream Frontend Releases
+
+OpenAI is shipping the macOS Codex bundle quickly right now. The official appcast showed five releases between April 16 and April 18, 2026, including two releases on April 18 alone. That means frontend drift is normal unless the package metadata is maintained intentionally.
+
+This repo now includes two native maintenance scripts:
+
+- `scripts/check-codex-upstream.sh`
+- `scripts/bump-codex-frontend.sh`
+
+Check the latest official macOS bundle:
+
+```bash
+./scripts/check-codex-upstream.sh
+```
+
+Bump the pinned frontend version and checksum in the AUR packaging files:
+
+```bash
+./scripts/bump-codex-frontend.sh --latest
+```
+
+That updates:
+
+- [packaging/aur/PKGBUILD](/home/jade/CodexDesktop/packaging/aur/PKGBUILD)
+- [packaging/aur/.SRCINFO](/home/jade/CodexDesktop/packaging/aur/.SRCINFO) when `makepkg` is available
+
+The intended upkeep loop is simple:
+
+1. Check the official appcast.
+2. Run the bump script when the version changes.
+3. Test the native shell against the new frontend bundle.
+4. Commit the packaging update and push GitHub plus AUR.
+
+For the GitHub source repository, [.github/workflows/sync-upstream-frontend.yml](/home/jade/CodexDesktop/.github/workflows/sync-upstream-frontend.yml) now checks the official appcast every six hours and commits updated AUR metadata automatically when the pinned frontend version changes.
+
+The AUR repo is intentionally still a separate push. If you want full end-to-end automation later, the clean path is to add an AUR SSH deploy key as a GitHub secret and mirror the updated `packaging/aur/` tree into the AUR repo from a second workflow.
+
 ## Notes
 
 - This project currently targets the native Linux use case first.

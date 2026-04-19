@@ -2,4 +2,6 @@
 /extracted/
 /*.dmg
 /.codex
-
+/packaging/aur/*.zip
+/packaging/aur/*.pkg.tar.zst
+/packaging/aur/codex-native/
