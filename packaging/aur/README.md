@@ -40,6 +40,7 @@ sudo pacman -Rns codex-native
 - The package downloads the pinned official Codex macOS bundle and extracts the frontend locally during package build.
 - On Wayland, the launcher defaults `WEBKIT_DISABLE_DMABUF_RENDERER=1`.
 - To refresh the pinned upstream frontend version from the main repo, run `./scripts/bump-codex-frontend.sh --latest` from the repository root.
+- To publish the same packaging files into the AUR git repo, use `./scripts/sync-aur-repo.sh /path/to/aur-repo` or configure the GitHub Actions workflow with an `AUR_SSH_PRIVATE_KEY` secret.
 
 ## Stable Package Later
 

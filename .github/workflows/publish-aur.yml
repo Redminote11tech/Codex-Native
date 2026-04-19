@@ -1,0 +1,65 @@
+name: Publish AUR Package
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'packaging/aur/**'
+      - 'scripts/sync-aur-repo.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    if: ${{ secrets.AUR_SSH_PRIVATE_KEY != '' }}
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+
+    env:
+      AUR_PACKAGE_NAME: codex-native-git
+
+    steps:
+      - name: Install tooling
+        run: pacman -Sy --noconfirm git openssh
+
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Mark workspace safe for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Configure SSH for AUR
+        run: |
+          install -dm700 ~/.ssh
+          printf '%s\n' '${{ secrets.AUR_SSH_PRIVATE_KEY }}' > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts
+
+      - name: Clone AUR repository
+        run: git clone "ssh://aur@aur.archlinux.org/${AUR_PACKAGE_NAME}.git" /tmp/aur-repo
+        env:
+          GIT_SSH_COMMAND: ssh -i ~/.ssh/aur
+
+      - name: Sync package files
+        run: ./scripts/sync-aur-repo.sh /tmp/aur-repo
+
+      - name: Commit and push when packaging changed
+        run: |
+          cd /tmp/aur-repo
+          if git diff --quiet --exit-code; then
+            echo "No AUR changes to publish."
+            exit 0
+          fi
+
+          version="$(sed -n 's/^pkgver=//p' PKGBUILD)"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add PKGBUILD .SRCINFO codex-native.desktop codex-native-launcher README.md
+          git commit -m "Update ${AUR_PACKAGE_NAME} to ${version}"
+          git push origin master
+        env:
+          GIT_SSH_COMMAND: ssh -i ~/.ssh/aur

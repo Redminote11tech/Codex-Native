@@ -140,7 +140,9 @@ The intended upkeep loop is simple:
 
 For the GitHub source repository, [.github/workflows/sync-upstream-frontend.yml](/home/jade/CodexDesktop/.github/workflows/sync-upstream-frontend.yml) now checks the official appcast every six hours and commits updated AUR metadata automatically when the pinned frontend version changes.
 
-The AUR repo is intentionally still a separate push. If you want full end-to-end automation later, the clean path is to add an AUR SSH deploy key as a GitHub secret and mirror the updated `packaging/aur/` tree into the AUR repo from a second workflow.
+The AUR repo is now prepared for separate automation as well. [.github/workflows/publish-aur.yml](/home/jade/CodexDesktop/.github/workflows/publish-aur.yml) will publish the AUR package repository after packaging changes, but only once the GitHub repo has an `AUR_SSH_PRIVATE_KEY` secret with a key that is authorized for your AUR package.
+
+The sync is intentionally narrow. It publishes only the packaging files from [packaging/aur](/home/jade/CodexDesktop/packaging/aur) through [scripts/sync-aur-repo.sh](/home/jade/CodexDesktop/scripts/sync-aur-repo.sh), instead of mirroring the full source tree into AUR.
 
 ## Notes
 
