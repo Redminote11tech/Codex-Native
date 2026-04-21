@@ -5,6 +5,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 pkgbuild_path="$repo_root/packaging/aur/PKGBUILD"
 srcinfo_path="$repo_root/packaging/aur/.SRCINFO"
+is_root="${EUID:-$(id -u)}"
 
 usage() {
   cat <<'EOF'
@@ -22,6 +23,17 @@ if [[ ! -f "$pkgbuild_path" ]]; then
   echo "missing PKGBUILD at $pkgbuild_path" >&2
   exit 1
 fi
+
+refresh_srcinfo_without_makepkg() {
+  if [[ ! -f "$srcinfo_path" ]]; then
+    echo "warning: missing .SRCINFO template, skipping refresh" >&2
+    return 0
+  fi
+
+  perl -0pi -e "s/(pkgver = ).*/\1r0.0/" "$srcinfo_path"
+  perl -0pi -e "s/Codex-darwin-arm64-[0-9.]+\\.zip/${zip_file_name}/g" "$srcinfo_path"
+  perl -0pi -e "s/sha256sums = [0-9a-f]{64}/sha256sums = ${sha256}/" "$srcinfo_path"
+}
 
 latest_from_appcast() {
   "$repo_root/scripts/check-codex-upstream.sh" --plain
@@ -55,13 +67,18 @@ perl -0pi -e "s/_codex_frontend_version=.*/_codex_frontend_version=${version}/" 
 perl -0pi -e "s/Codex-darwin-arm64-[0-9.]+\\.zip/${zip_file_name}/g" "$pkgbuild_path"
 perl -0pi -e "s/'[0-9a-f]{64}'/'${sha256}'/" "$pkgbuild_path"
 
-if command -v makepkg >/dev/null 2>&1; then
+if command -v makepkg >/dev/null 2>&1 && [[ "$is_root" -ne 0 ]]; then
   (
     cd "$repo_root/packaging/aur"
     makepkg --printsrcinfo > .SRCINFO
   )
 else
-  echo "warning: makepkg not found, skipping .SRCINFO refresh" >&2
+  if [[ "$is_root" -eq 0 ]]; then
+    echo "warning: running as root, using fallback .SRCINFO refresh" >&2
+  else
+    echo "warning: makepkg not found, using fallback .SRCINFO refresh" >&2
+  fi
+  refresh_srcinfo_without_makepkg
 fi
 
 printf 'Updated frontend metadata\n'

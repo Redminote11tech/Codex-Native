@@ -14,28 +14,42 @@ permissions:
 
 jobs:
   publish:
-    if: ${{ secrets.AUR_SSH_PRIVATE_KEY != '' }}
     runs-on: ubuntu-latest
     container:
       image: archlinux:base-devel
 
     env:
       AUR_PACKAGE_NAME: codex-native-git
+      AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
 
     steps:
+      - name: Check AUR secret availability
+        id: aur_secret
+        run: |
+          if [[ -n "${AUR_SSH_PRIVATE_KEY}" ]]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "AUR_SSH_PRIVATE_KEY is not configured; skipping publish."
+          fi
+
       - name: Install tooling
+        if: steps.aur_secret.outputs.present == 'true'
         run: pacman -Sy --noconfirm git openssh
 
       - name: Check out repository
+        if: steps.aur_secret.outputs.present == 'true'
         uses: actions/checkout@v4
 
       - name: Mark workspace safe for git
+        if: steps.aur_secret.outputs.present == 'true'
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Configure SSH for AUR
+        if: steps.aur_secret.outputs.present == 'true'
         run: |
           install -dm700 ~/.ssh
-          printf '%s\n' '${{ secrets.AUR_SSH_PRIVATE_KEY }}' > ~/.ssh/aur
+          printf '%s\n' "${AUR_SSH_PRIVATE_KEY}" > ~/.ssh/aur
           chmod 600 ~/.ssh/aur
           ssh-keyscan -H aur.archlinux.org >> ~/.ssh/known_hosts
           cat > ~/.ssh/config <<'EOF'
@@ -49,12 +63,15 @@ jobs:
           chmod 600 ~/.ssh/config
 
       - name: Clone AUR repository
+        if: steps.aur_secret.outputs.present == 'true'
         run: git clone "ssh://aur@aur.archlinux.org/${AUR_PACKAGE_NAME}.git" /tmp/aur-repo
 
       - name: Sync package files
+        if: steps.aur_secret.outputs.present == 'true'
         run: ./scripts/sync-aur-repo.sh /tmp/aur-repo
 
       - name: Commit and push when packaging changed
+        if: steps.aur_secret.outputs.present == 'true'
         run: |
           cd /tmp/aur-repo
           if git diff --quiet --exit-code; then

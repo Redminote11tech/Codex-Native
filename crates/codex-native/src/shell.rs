@@ -1147,6 +1147,157 @@ fn handle_fetch_request(
             );
             Ok(())
         }
+        url if url.starts_with("/accounts/check/") => {
+            dispatch_fetch_success(
+                webview,
+                request_id,
+                json!({
+                    "account_ordering": [],
+                    "accounts": {},
+                }),
+            );
+            Ok(())
+        }
+        "/wham/usage" => {
+            let snapshot = read_effective_auth_snapshot(auth_state);
+            let plan_type = snapshot
+                .account
+                .as_ref()
+                .and_then(|account| account.get("planType"))
+                .and_then(JsonValue::as_str)
+                .unwrap_or("unknown");
+            let unlimited_credits = matches!(
+                plan_type,
+                "plus"
+                    | "pro"
+                    | "team"
+                    | "business"
+                    | "enterprise"
+                    | "enterprise_cbp_usage_based"
+                    | "edu"
+                    | "self_serve_business_usage_based"
+            );
+            dispatch_fetch_success(
+                webview,
+                request_id,
+                json!({
+                    "rate_limit": {
+                        "allowed": true,
+                        "limit_reached": false,
+                        "primary_window": JsonValue::Null,
+                        "secondary_window": JsonValue::Null,
+                        "rate_limit_name": JsonValue::Null,
+                    },
+                    "additional_rate_limits": [],
+                    "credits": {
+                        "has_credits": unlimited_credits,
+                        "unlimited": unlimited_credits,
+                        "balance": 0,
+                    },
+                    "plan_type": plan_type,
+                    "spend_control": {
+                        "reached": false,
+                    },
+                }),
+            );
+            Ok(())
+        }
+        "/subscriptions/auto_top_up/settings" => {
+            dispatch_fetch_success(
+                webview,
+                request_id,
+                json!({
+                    "is_enabled": false,
+                    "recharge_threshold": JsonValue::Null,
+                    "recharge_target": JsonValue::Null,
+                }),
+            );
+            Ok(())
+        }
+        "/subscriptions/auto_top_up/enable" => {
+            let request = body
+                .and_then(parse_json_body)
+                .unwrap_or(JsonValue::Null);
+            let recharge_threshold = request
+                .get("recharge_threshold")
+                .cloned()
+                .unwrap_or(JsonValue::Null);
+            let recharge_target = request
+                .get("recharge_target")
+                .cloned()
+                .unwrap_or(JsonValue::Null);
+            dispatch_fetch_success(
+                webview,
+                request_id,
+                json!({
+                    "is_enabled": true,
+                    "recharge_threshold": recharge_threshold,
+                    "recharge_target": recharge_target,
+                    "immediate_top_up_status": "succeeded",
+                }),
+            );
+            Ok(())
+        }
+        "/subscriptions/auto_top_up/update" => {
+            let request = body
+                .and_then(parse_json_body)
+                .unwrap_or(JsonValue::Null);
+            let recharge_threshold = request
+                .get("recharge_threshold")
+                .cloned()
+                .unwrap_or(JsonValue::Null);
+            let recharge_target = request
+                .get("recharge_target")
+                .cloned()
+                .unwrap_or(JsonValue::Null);
+            dispatch_fetch_success(
+                webview,
+                request_id,
+                json!({
+                    "is_enabled": true,
+                    "recharge_threshold": recharge_threshold,
+                    "recharge_target": recharge_target,
+                    "immediate_top_up_status": "succeeded",
+                }),
+            );
+            Ok(())
+        }
+        "/subscriptions/auto_top_up/disable" => {
+            dispatch_fetch_success(
+                webview,
+                request_id,
+                json!({
+                    "is_enabled": false,
+                    "recharge_threshold": JsonValue::Null,
+                    "recharge_target": JsonValue::Null,
+                    "immediate_top_up_status": "disabled",
+                }),
+            );
+            Ok(())
+        }
+        "/accounts/send_add_credits_nudge_email" => {
+            dispatch_fetch_success(webview, request_id, json!({ "ok": true }));
+            Ok(())
+        }
+        url if url.starts_with("/checkout_pricing_config/configs/") => {
+            let currency_code = url
+                .rsplit('/')
+                .next()
+                .filter(|value| !value.is_empty())
+                .unwrap_or("USD");
+            dispatch_fetch_success(
+                webview,
+                request_id,
+                json!({
+                    "currency_config": {
+                        "symbol_code": currency_code,
+                        "minor_unit_exponent": 2,
+                        "amount_per_credit": JsonValue::Null,
+                    },
+                }),
+            );
+            Ok(())
+        }
         url if url.starts_with("/wham/tasks/list") => {
             dispatch_fetch_success(webview, request_id, json!({ "items": [] }));
             Ok(())
@@ -1176,7 +1327,13 @@ fn handle_fetch_request(
             dispatch_fetch_success(
                 webview,
                 request_id,
-                read_store_value_or_default(config_state, &key, default_configuration_value),
+                json!({
+                    "value": read_store_value_or_default(
+                        config_state,
+                        &key,
+                        default_configuration_value,
+                    ),
+                }),
             );
             Ok(())
         }
@@ -1220,6 +1377,17 @@ fn handle_fetch_request(
         }
         "vscode://codex/list-pending-automation-run-threads" => {
             dispatch_fetch_success(webview, request_id, json!([]));
+            Ok(())
+        }
+        "vscode://codex/recommended-skills" => {
+            dispatch_fetch_success(
+                webview,
+                request_id,
+                json!({
+                    "skills": [],
+                    "repoRoot": codex_home_dir().join("skills"),
+                }),
+            );
             Ok(())
         }
         "vscode://codex/active-workspace-roots" => {
@@ -1442,6 +1610,7 @@ fn handle_fetch_request(
             Ok(())
         }
         _ => {
+            eprintln!("native-shell: unsupported native fetch url: {url}");
             dispatch_fetch_error(
                 webview,
                 request_id,
