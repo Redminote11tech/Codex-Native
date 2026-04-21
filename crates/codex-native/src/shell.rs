@@ -213,6 +213,10 @@ const STATSIG_DEFAULT_ENABLE_FEATURES_ATOM_KEY: &str = "statsig_default_enable_f
 const AVATAR_OVERLAY_GATE_KEY: &str = "2679188970";
 #[cfg(target_os = "linux")]
 const HEARTBEAT_AUTOMATIONS_GATE_KEY: &str = "1488233300";
+const HOME_HERO_MASCOT_MARKER: &str = "home.hero.letsBuild";
+const HOME_HERO_ICON_SNIPPET: &str =
+    "children:(0,$.jsx)(Zh,{className:`h-12 w-12 text-token-foreground/20`})";
+const HOME_HERO_MASCOT_SNIPPET: &str = "children:(0,$.jsx)(aee,{assetRef:ree().selectedAvatar?.assetRef,className:`relative z-10 h-20 w-20`,state:`idle`})";
 #[cfg(target_os = "linux")]
 #[derive(Default)]
 struct LocalAuthSnapshot {
@@ -588,6 +592,7 @@ fn load_asset_bytes(
             message: format!("asset read failed for {}: {error}", file_path.display()),
         }
     })?;
+    let bytes = apply_frontend_asset_overrides(&file_path, bytes);
 
     Ok((bytes, guess_mime(&file_path)))
 }
@@ -609,7 +614,7 @@ fn serve_asset(root: &Path, request_path: &str) -> Response<Cow<'static, [u8]>> 
 
     let file_path = root.join(safe_path);
     let bytes = match fs::read(&file_path) {
-        Ok(bytes) => bytes,
+        Ok(bytes) => apply_frontend_asset_overrides(&file_path, bytes),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return simple_response(
                 StatusCode::NOT_FOUND,
@@ -652,6 +657,27 @@ fn simple_response(
         .header(CONTENT_TYPE, mime)
         .body(body)
         .unwrap_or_else(|_| Response::new(Cow::Borrowed(b"response build failed")))
+}
+
+fn apply_frontend_asset_overrides(file_path: &Path, bytes: Vec<u8>) -> Vec<u8> {
+    if file_path.extension().and_then(|extension| extension.to_str()) != Some("js") {
+        return bytes;
+    }
+
+    patch_home_hero_mascot(bytes)
+}
+
+fn patch_home_hero_mascot(bytes: Vec<u8>) -> Vec<u8> {
+    let Ok(text) = String::from_utf8(bytes.clone()) else {
+        return bytes;
+    };
+
+    if text.contains(HOME_HERO_MASCOT_SNIPPET) || !text.contains(HOME_HERO_MASCOT_MARKER) {
+        return text.into_bytes();
+    }
+
+    text.replacen(HOME_HERO_ICON_SNIPPET, HOME_HERO_MASCOT_SNIPPET, 1)
+        .into_bytes()
 }
 
 fn sanitize_relative_path(path: &str) -> Option<PathBuf> {
@@ -1079,7 +1105,14 @@ fn handle_view_message(
             );
             Ok(())
         }
-        "fetch" => handle_fetch_request(webview, global_state, config_state, auth_state, payload),
+        "fetch" => handle_fetch_request(
+            webview,
+            persisted_atoms,
+            global_state,
+            config_state,
+            auth_state,
+            payload,
+        ),
         "mcp-request" => handle_mcp_request(
             webview,
             global_state,
@@ -1097,6 +1130,7 @@ fn handle_view_message(
 #[cfg(target_os = "linux")]
 fn handle_fetch_request(
     webview: &WebView,
+    persisted_atoms: &PersistedAtomState,
     global_state: &JsonMapState,
     config_state: &JsonMapState,
     auth_state: &JsonMapState,
@@ -1367,6 +1401,14 @@ fn handle_fetch_request(
             dispatch_fetch_success(webview, request_id, json!({ "ok": true, "value": value }));
             Ok(())
         }
+        "vscode://codex/ipc-request" => {
+            let response = body
+                .and_then(parse_json_body)
+                .map(|request| handle_native_ipc_request(webview, persisted_atoms, global_state, &request))
+                .unwrap_or_else(|| ipc_error_response("ipc-request is missing json body"));
+            dispatch_fetch_success(webview, request_id, response);
+            Ok(())
+        }
         "vscode://codex/list-pinned-threads" => {
             dispatch_fetch_success(webview, request_id, json!([]));
             Ok(())
@@ -1388,6 +1430,43 @@ fn handle_fetch_request(
                     "repoRoot": codex_home_dir().join("skills"),
                 }),
             );
+            Ok(())
+        }
+        "vscode://codex/email-domain-mail-provider" => {
+            let provider = body
+                .and_then(parse_json_body)
+                .and_then(|request| {
+                    request
+                        .get("domain")
+                        .and_then(JsonValue::as_str)
+                        .map(infer_mail_provider)
+                })
+                .unwrap_or("other");
+            dispatch_fetch_success(webview, request_id, json!({ "provider": provider }));
+            Ok(())
+        }
+        "vscode://codex/fast-mode-rollout-metrics" => {
+            dispatch_fetch_success(
+                webview,
+                request_id,
+                json!({
+                    "estimatedSavedMs": 0,
+                    "rolloutCountWithCompletedTurns": 0,
+                }),
+            );
+            Ok(())
+        }
+        url if url.starts_with("vscode://codex/codex-agents-md") => {
+            let should_save = method != "GET" || url.ends_with("-save");
+            let response = if should_save {
+                save_codex_agents_md(body)
+            } else {
+                load_codex_agents_md()
+            };
+            match response {
+                Ok(value) => dispatch_fetch_success(webview, request_id, value),
+                Err(error) => dispatch_fetch_error(webview, request_id, 500, error),
+            }
             Ok(())
         }
         "vscode://codex/active-workspace-roots" => {
@@ -1609,6 +1688,38 @@ fn handle_fetch_request(
             );
             Ok(())
         }
+        url if parse_aip_connector_metadata_request(url).is_some() => {
+            let connector_id = parse_aip_connector_metadata_request(url)
+                .ok_or("connector metadata request is missing connector id")?;
+            dispatch_fetch_success(
+                webview,
+                request_id,
+                connector_stub_metadata_response(connector_id),
+            );
+            Ok(())
+        }
+        url if parse_aip_connector_logo_request(url).is_some() => {
+            let (connector_id, theme) = parse_aip_connector_logo_request(url)
+                .ok_or("connector logo request is missing connector id")?;
+            dispatch_fetch_success(
+                webview,
+                request_id,
+                connector_stub_logo_response(connector_id, theme),
+            );
+            Ok(())
+        }
+        url if parse_aip_connector_tos_request(url).is_some() => {
+            dispatch_fetch_success(
+                webview,
+                request_id,
+                json!({
+                    "bodyMarkdown": JsonValue::Null,
+                    "title": "Terms of service",
+                    "url": JsonValue::Null,
+                }),
+            );
+            Ok(())
+        }
         _ => {
             eprintln!("native-shell: unsupported native fetch url: {url}");
             dispatch_fetch_error(
@@ -1620,6 +1731,114 @@ fn handle_fetch_request(
             Ok(())
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn handle_native_ipc_request(
+    webview: &WebView,
+    persisted_atoms: &PersistedAtomState,
+    global_state: &JsonMapState,
+    request: &JsonValue,
+) -> JsonValue {
+    let Some(method) = request.get("method").and_then(JsonValue::as_str) else {
+        return ipc_error_response("ipc-request is missing method");
+    };
+    let params = request.get("params").cloned().unwrap_or(JsonValue::Null);
+
+    match method {
+        "set-default-feature-overrides" => {
+            let overrides = params.get("overrides").cloned().unwrap_or(JsonValue::Null);
+            let deleted = overrides.is_null();
+            if deleted {
+                persisted_atoms
+                    .borrow_mut()
+                    .remove(STATSIG_DEFAULT_ENABLE_FEATURES_ATOM_KEY);
+            } else {
+                persisted_atoms.borrow_mut().insert(
+                    STATSIG_DEFAULT_ENABLE_FEATURES_ATOM_KEY.to_string(),
+                    overrides.clone(),
+                );
+            }
+            dispatch_message_to_view(
+                webview,
+                &json!({
+                    "type": "persisted-atom-updated",
+                    "key": STATSIG_DEFAULT_ENABLE_FEATURES_ATOM_KEY,
+                    "value": overrides,
+                    "deleted": deleted,
+                }),
+            );
+            ipc_success_response(json!({}))
+        }
+        "set-experimental-feature-enablement-for-host" => {
+            let host_id = params
+                .get("hostId")
+                .and_then(JsonValue::as_str)
+                .unwrap_or(DEFAULT_HOST_ID);
+            let enablement = params
+                .get("enablement")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            write_experimental_feature_enablement(global_state, host_id, enablement);
+            ipc_success_response(json!({}))
+        }
+        "active-workspace-roots" => ipc_success_response(json!({
+            "roots": current_active_workspace_roots(global_state),
+        })),
+        "workspace-root-options" => {
+            let roots = current_workspace_root_options(global_state);
+            ipc_success_response(json!({
+                "roots": roots,
+                "labels": current_workspace_root_labels(global_state, &roots),
+            }))
+        }
+        "remote-workspace-directory-entries" => {
+            let directories_only = params
+                .get("directoriesOnly")
+                .and_then(JsonValue::as_bool)
+                .unwrap_or(false);
+            let mut entries = read_workspace_directory_entries(global_state, params.clone());
+            if directories_only {
+                entries.retain(|entry| {
+                    entry.get("type").and_then(JsonValue::as_str) == Some("directory")
+                });
+            }
+            ipc_success_response(json!(entries))
+        }
+        "set-remote-control-connections-enabled"
+        | "open-file"
+        | "import-external-agent-config"
+        | "thread-follower-set-collaboration-mode" => ipc_success_response(json!({})),
+        "open-in-targets" => ipc_success_response(json!([])),
+        "detect-external-agent-config" => ipc_success_response(JsonValue::Null),
+        _ => {
+            eprintln!(
+                "native-shell: unsupported ipc request method: {} params={}",
+                method, params
+            );
+            ipc_error_response(format!("unsupported ipc request method: {method}"))
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn ipc_success_response(result: JsonValue) -> JsonValue {
+    json!({
+        "requestId": "",
+        "type": "response",
+        "resultType": "success",
+        "result": result,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn ipc_error_response(error: impl Into<String>) -> JsonValue {
+    json!({
+        "requestId": "",
+        "type": "response",
+        "resultType": "error",
+        "error": error.into(),
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -2097,6 +2316,75 @@ fn parse_json_body(body: &str) -> Option<JsonValue> {
 }
 
 #[cfg(target_os = "linux")]
+fn infer_mail_provider(domain: &str) -> &'static str {
+    let domain = domain.trim().to_ascii_lowercase();
+    match domain.as_str() {
+        "gmail.com" | "googlemail.com" | "google.com" => "google",
+        "outlook.com"
+        | "hotmail.com"
+        | "live.com"
+        | "msn.com"
+        | "office365.com"
+        | "microsoft.com" => "microsoft",
+        _ => "other",
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn codex_agents_md_path() -> PathBuf {
+    codex_home_dir().join("AGENTS.md")
+}
+
+#[cfg(target_os = "linux")]
+fn load_codex_agents_md() -> Result<JsonValue, String> {
+    let path = codex_agents_md_path();
+    let contents = match fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(format!(
+                "failed to read {}: {error}",
+                path.display()
+            ));
+        }
+    };
+    Ok(json!({
+        "path": path,
+        "contents": contents,
+    }))
+}
+
+#[cfg(target_os = "linux")]
+fn save_codex_agents_md(body: Option<&str>) -> Result<JsonValue, String> {
+    let path = codex_agents_md_path();
+    let request = body.and_then(parse_json_body).unwrap_or(JsonValue::Null);
+    let contents = request
+        .get("contents")
+        .or_else(|| request.get("value"))
+        .or_else(|| request.get("raw"))
+        .and_then(JsonValue::as_str)
+        .unwrap_or_default()
+        .to_string();
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "failed to create {}: {error}",
+                parent.display()
+            )
+        })?;
+    }
+
+    fs::write(&path, &contents)
+        .map_err(|error| format!("failed to write {}: {error}", path.display()))?;
+
+    Ok(json!({
+        "path": path,
+        "contents": contents,
+    }))
+}
+
+#[cfg(target_os = "linux")]
 fn read_local_file_binary(path: &str) -> Result<(String, &'static str), (u16, String)> {
     let requested_path = PathBuf::from(path);
     let resolved_path = if requested_path.is_absolute() {
@@ -2182,6 +2470,127 @@ fn encode_base64(bytes: &[u8]) -> String {
     }
 
     output
+}
+
+#[cfg(target_os = "linux")]
+fn parse_query_parameter<'a>(query: &'a str, key: &str) -> Option<&'a str> {
+    query.split('&').find_map(|segment| {
+        let (candidate_key, value) = segment.split_once('=')?;
+        if candidate_key == key {
+            Some(value)
+        } else {
+            None
+        }
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn parse_aip_connector_metadata_request(url: &str) -> Option<&str> {
+    let connector_path = url.strip_prefix("/aip/connectors/")?;
+    let connector_id = connector_path.split('?').next().unwrap_or(connector_path);
+
+    if connector_id.is_empty() || connector_id.contains('/') {
+        return None;
+    }
+
+    Some(connector_id)
+}
+
+#[cfg(target_os = "linux")]
+fn parse_aip_connector_logo_request(url: &str) -> Option<(&str, &str)> {
+    let connector_path = url.strip_prefix("/aip/connectors/")?;
+    let (path_without_query, query) = connector_path
+        .split_once('?')
+        .unwrap_or((connector_path, ""));
+    let connector_id = path_without_query.strip_suffix("/logo")?;
+
+    if connector_id.is_empty() || connector_id.contains('/') {
+        return None;
+    }
+
+    Some((
+        connector_id,
+        parse_query_parameter(query, "theme").unwrap_or("light"),
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn parse_aip_connector_tos_request(url: &str) -> Option<&str> {
+    let connector_path = url.strip_prefix("/aip/connectors/")?;
+    let path_without_query = connector_path.split('?').next().unwrap_or(connector_path);
+    let connector_id = path_without_query.strip_suffix("/tos")?;
+
+    if connector_id.is_empty() || connector_id.contains('/') {
+        return None;
+    }
+
+    Some(connector_id)
+}
+
+#[cfg(target_os = "linux")]
+fn connector_stub_metadata_response(connector_id: &str) -> JsonValue {
+    let name = connector_stub_name(connector_id);
+
+    json!({
+        "id": connector_id,
+        "name": name,
+        "display_name": name,
+        "description": JsonValue::Null,
+        "logo_url": format!("connectors://{connector_id}/logo?theme=light"),
+        "logo_url_dark": format!("connectors://{connector_id}/logo?theme=dark"),
+        "link_params_schema": JsonValue::Null,
+        "supported_auth": [
+            {
+                "type": "oauth",
+            }
+        ],
+        "branding": {
+            "developer": JsonValue::Null,
+        },
+        "app_metadata": {
+            "developer": JsonValue::Null,
+        },
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn connector_stub_logo_response(connector_id: &str, theme: &str) -> JsonValue {
+    let (background, panel, foreground) = if theme.eq_ignore_ascii_case("dark") {
+        ("#0f172a", "#1e293b", "#f8fafc")
+    } else {
+        ("#f8fafc", "#e2e8f0", "#0f172a")
+    };
+    let glyph = if connector_id.starts_with("asdk_app_") {
+        "A"
+    } else {
+        "C"
+    };
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 96 96" fill="none"><rect width="96" height="96" rx="24" fill="{background}"/><rect x="12" y="12" width="72" height="72" rx="18" fill="{panel}"/><text x="48" y="58" text-anchor="middle" font-family="Arial, sans-serif" font-size="36" font-weight="700" fill="{foreground}">{glyph}</text></svg>"#
+    );
+
+    json!({
+        "contentType": "image/svg+xml",
+        "base64": encode_base64(svg.as_bytes()),
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn connector_stub_name(connector_id: &str) -> String {
+    let (prefix, raw_suffix) = if let Some(suffix) = connector_id.strip_prefix("asdk_app_") {
+        ("App", suffix)
+    } else if let Some(suffix) = connector_id.strip_prefix("connector_") {
+        ("Connector", suffix)
+    } else {
+        ("Connector", connector_id)
+    };
+    let short_suffix = raw_suffix.chars().take(6).collect::<String>();
+
+    if short_suffix.is_empty() {
+        prefix.to_string()
+    } else {
+        format!("{prefix} {short_suffix}")
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -3764,5 +4173,28 @@ mod tests {
 
         assert_eq!(by_id.get("plugins"), Some(&true));
         assert_eq!(by_id.get("tool_search"), Some(&false));
+    }
+
+    #[test]
+    fn patch_home_hero_mascot_replaces_placeholder_icon() {
+        let source = format!(
+            "prefix {} middle {} suffix",
+            HOME_HERO_MASCOT_MARKER, HOME_HERO_ICON_SNIPPET
+        );
+
+        let patched = patch_home_hero_mascot(source.into_bytes());
+        let patched = String::from_utf8(patched).expect("patched hero should remain utf-8");
+
+        assert!(patched.contains(HOME_HERO_MASCOT_SNIPPET));
+        assert!(!patched.contains(HOME_HERO_ICON_SNIPPET));
+    }
+
+    #[test]
+    fn patch_home_hero_mascot_skips_unrelated_assets() {
+        let source = b"console.log('plain asset')".to_vec();
+
+        let patched = apply_frontend_asset_overrides(Path::new("assets/plain.js"), source.clone());
+
+        assert_eq!(patched, source);
     }
 }

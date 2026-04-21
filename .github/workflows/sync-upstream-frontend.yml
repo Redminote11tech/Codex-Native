@@ -19,7 +19,7 @@ jobs:
         run: pacman -Sy --noconfirm curl git
 
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Mark workspace safe for git
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"

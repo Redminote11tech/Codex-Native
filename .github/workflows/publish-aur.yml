@@ -39,7 +39,7 @@ jobs:
 
       - name: Check out repository
         if: steps.aur_secret.outputs.present == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Mark workspace safe for git
         if: steps.aur_secret.outputs.present == 'true'
@@ -66,7 +66,7 @@ jobs:
       - name: Clone AUR repository
         if: steps.aur_secret.outputs.present == 'true'
         env:
-          GIT_SSH_COMMAND: ssh -i ~/.ssh/aur -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new
+          GIT_SSH_COMMAND: ssh -F ~/.ssh/config
         run: git clone "ssh://aur@aur.archlinux.org/${AUR_PACKAGE_NAME}.git" /tmp/aur-repo
 
       - name: Sync package files
@@ -76,7 +76,7 @@ jobs:
       - name: Commit and push when packaging changed
         if: steps.aur_secret.outputs.present == 'true'
         env:
-          GIT_SSH_COMMAND: ssh -i ~/.ssh/aur -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new
+          GIT_SSH_COMMAND: ssh -F ~/.ssh/config
         run: |
           cd /tmp/aur-repo
           if git diff --quiet --exit-code; then
