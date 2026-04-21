@@ -65,6 +65,8 @@ jobs:
 
       - name: Clone AUR repository
         if: steps.aur_secret.outputs.present == 'true'
+        env:
+          GIT_SSH_COMMAND: ssh -i ~/.ssh/aur -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new
         run: git clone "ssh://aur@aur.archlinux.org/${AUR_PACKAGE_NAME}.git" /tmp/aur-repo
 
       - name: Sync package files
@@ -73,6 +75,8 @@ jobs:
 
       - name: Commit and push when packaging changed
         if: steps.aur_secret.outputs.present == 'true'
+        env:
+          GIT_SSH_COMMAND: ssh -i ~/.ssh/aur -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new
         run: |
           cd /tmp/aur-repo
           if git diff --quiet --exit-code; then
