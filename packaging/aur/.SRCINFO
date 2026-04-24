@@ -17,8 +17,8 @@ pkgbase = codex-native-git
 	provides = codex-native
 	conflicts = codex-native
 	source = codex-native::git+https://github.com/Redminote11tech/Codex-Native.git
-	source = Codex-darwin-arm64-26.422.21637.zip::https://persistent.oaistatic.com/codex-app-prod/Codex-darwin-arm64-26.422.21637.zip
+	source = Codex-darwin-arm64-26.422.30944.zip::https://persistent.oaistatic.com/codex-app-prod/Codex-darwin-arm64-26.422.30944.zip
 	sha256sums = SKIP
-	sha256sums = 6e733818af68baa0e1c30afbac877a4f18401b094766f1acba0cc10d1e33270c
+	sha256sums = 5705b030cbb557c84fd2fdbd7c64693867d17c9c5ff56a3060891ca05d55f852
 
 pkgname = codex-native-git
