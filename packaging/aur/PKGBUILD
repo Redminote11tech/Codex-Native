@@ -10,14 +10,14 @@ optdepends=('codex: Codex CLI backend bridge for chat, auth, and runtime integra
 makedepends=('cargo' 'git' 'rust' 'unzip')
 provides=('codex-native')
 conflicts=('codex-native')
-_codex_frontend_version=26.422.20832
+_codex_frontend_version=26.422.21637
 source=(
   "codex-native::git+${url}.git"
   "Codex-darwin-arm64-${_codex_frontend_version}.zip::https://persistent.oaistatic.com/codex-app-prod/Codex-darwin-arm64-${_codex_frontend_version}.zip"
 )
 sha256sums=(
   'SKIP'
-  '41b7c2c85ed099d62dabe5273cc4a3fe3d6735a48370b41b9bcf7aa84d4b6d18'
+  '6e733818af68baa0e1c30afbac877a4f18401b094766f1acba0cc10d1e33270c'
 )
 
 pkgver() {
