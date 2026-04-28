@@ -179,6 +179,8 @@ const SHELL_INIT_SCRIPT: &str = r#"
 
 #[cfg(target_os = "linux")]
 const SCRIPT_MESSAGE_HANDLER: &str = "codexNative";
+#[cfg(target_os = "linux")]
+const APP_SERVER_INIT_REQUEST_ID: &str = "native-shell:init";
 
 #[cfg(target_os = "linux")]
 struct AssetLoadError {
@@ -213,10 +215,6 @@ const STATSIG_DEFAULT_ENABLE_FEATURES_ATOM_KEY: &str = "statsig_default_enable_f
 const AVATAR_OVERLAY_GATE_KEY: &str = "2679188970";
 #[cfg(target_os = "linux")]
 const HEARTBEAT_AUTOMATIONS_GATE_KEY: &str = "1488233300";
-const HOME_HERO_MASCOT_MARKER: &str = "home.hero.letsBuild";
-const HOME_HERO_ICON_SNIPPET: &str =
-    "children:(0,$.jsx)(Zh,{className:`h-12 w-12 text-token-foreground/20`})";
-const HOME_HERO_MASCOT_SNIPPET: &str = "children:(0,$.jsx)(aee,{assetRef:ree().selectedAvatar?.assetRef,className:`relative z-10 h-20 w-20`,state:`idle`})";
 #[cfg(target_os = "linux")]
 #[derive(Default)]
 struct LocalAuthSnapshot {
@@ -224,15 +222,29 @@ struct LocalAuthSnapshot {
 }
 #[cfg(target_os = "linux")]
 enum AppServerBridgeEvent {
-    Response(JsonValue),
-    Notification { method: String, params: JsonValue },
+    Response {
+        message: JsonValue,
+        request_method: Option<String>,
+    },
+    Notification {
+        method: String,
+        params: JsonValue,
+    },
     Request(JsonValue),
     Fatal(String),
 }
 #[cfg(target_os = "linux")]
+struct AppServerWriterState {
+    writer: ChildStdin,
+    initialized: bool,
+    pending_lines: Vec<String>,
+    pending_request_methods: HashMap<String, String>,
+}
+
+#[cfg(target_os = "linux")]
 struct AppServerBridge {
     child: Arc<Mutex<Child>>,
-    writer: Arc<Mutex<ChildStdin>>,
+    writer_state: Arc<Mutex<AppServerWriterState>>,
 }
 
 #[cfg(target_os = "linux")]
@@ -240,18 +252,85 @@ impl AppServerBridge {
     fn send_json(&self, value: &JsonValue) -> Result<(), String> {
         let mut line = value.to_string();
         line.push('\n');
-        let mut writer = self
-            .writer
+        let mut state = self
+            .writer_state
             .lock()
             .map_err(|_| "failed to lock app-server stdin".to_string())?;
-        writer
-            .write_all(line.as_bytes())
-            .map_err(|error| format!("failed to write to app-server stdin: {error}"))?;
-        writer
-            .flush()
-            .map_err(|error| format!("failed to flush app-server stdin: {error}"))?;
+
+        remember_app_server_request_method(&mut state, value);
+
+        if !state.initialized && !is_app_server_initialize_message(value) {
+            state.pending_lines.push(line);
+            return Ok(());
+        }
+
+        write_app_server_line(&mut state.writer, &line)?;
         Ok(())
     }
+}
+
+#[cfg(target_os = "linux")]
+fn is_app_server_initialize_message(value: &JsonValue) -> bool {
+    value.get("id").and_then(JsonValue::as_str) == Some(APP_SERVER_INIT_REQUEST_ID)
+        && value.get("method").and_then(JsonValue::as_str) == Some("initialize")
+}
+
+#[cfg(target_os = "linux")]
+fn remember_app_server_request_method(state: &mut AppServerWriterState, value: &JsonValue) {
+    let Some(request_id) = value.get("id").and_then(JsonValue::as_str) else {
+        return;
+    };
+    let Some(method) = value.get("method").and_then(JsonValue::as_str) else {
+        return;
+    };
+
+    if is_app_server_initialize_message(value) {
+        return;
+    }
+
+    state
+        .pending_request_methods
+        .insert(request_id.to_string(), method.to_string());
+}
+
+#[cfg(target_os = "linux")]
+fn take_app_server_request_method(
+    writer_state: &Arc<Mutex<AppServerWriterState>>,
+    response: &JsonValue,
+) -> Option<String> {
+    let request_id = response.get("id").and_then(JsonValue::as_str)?;
+    let mut state = writer_state.lock().ok()?;
+    state.pending_request_methods.remove(request_id)
+}
+
+#[cfg(target_os = "linux")]
+fn write_app_server_line(writer: &mut ChildStdin, line: &str) -> Result<(), String> {
+    writer
+        .write_all(line.as_bytes())
+        .map_err(|error| format!("failed to write to app-server stdin: {error}"))?;
+    writer
+        .flush()
+        .map_err(|error| format!("failed to flush app-server stdin: {error}"))?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn mark_app_server_initialized(
+    writer_state: &Arc<Mutex<AppServerWriterState>>,
+) -> Result<(), String> {
+    let mut state = writer_state
+        .lock()
+        .map_err(|_| "failed to lock app-server stdin".to_string())?;
+    if state.initialized {
+        return Ok(());
+    }
+
+    state.initialized = true;
+    let pending_lines = std::mem::take(&mut state.pending_lines);
+    for line in pending_lines {
+        write_app_server_line(&mut state.writer, &line)?;
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -366,8 +445,9 @@ fn run_linux_gtk(web_root: PathBuf) -> Result<(), String> {
     if !user_content_manager.register_script_message_handler(SCRIPT_MESSAGE_HANDLER) {
         return Err("failed to register WebKit script message handler".to_string());
     }
+    let init_script_source = build_shell_init_script(&web_root);
     let init_script = UserScript::new(
-        SHELL_INIT_SCRIPT,
+        &init_script_source,
         UserContentInjectedFrames::TopFrame,
         UserScriptInjectionTime::Start,
         &[],
@@ -378,8 +458,7 @@ fn run_linux_gtk(web_root: PathBuf) -> Result<(), String> {
 
     let webview =
         WebView::new_with_context_and_user_content_manager(&context, &user_content_manager);
-    let persisted_atoms: PersistedAtomState =
-        Rc::new(RefCell::new(initial_persisted_atom_state()));
+    let persisted_atoms: PersistedAtomState = Rc::new(RefCell::new(initial_persisted_atom_state()));
     let global_state: JsonMapState = Rc::new(RefCell::new(HashMap::new()));
     let config_state: JsonMapState = Rc::new(RefCell::new(HashMap::new()));
     let auth_state: JsonMapState = Rc::new(RefCell::new(HashMap::new()));
@@ -441,31 +520,17 @@ fn run_linux_gtk(web_root: PathBuf) -> Result<(), String> {
             return;
         }
 
-        view.run_javascript(
-            "(function(){\
-                const root = document.getElementById('root');\
-                return JSON.stringify({\
-                    href: window.location.href,\
-                    title: document.title,\
-                    bodyClass: document.body.className,\
-                    rootChildCount: root ? root.childElementCount : null,\
-                    textSample: (document.body.innerText || '').slice(0, 500)\
-                });\
-            })()",
-            None::<&gio::Cancellable>,
-            |result| match result {
-                Ok(result) => {
-                    let snapshot = result
-                        .js_value()
-                        .map(|value| value.to_string().to_string())
-                        .unwrap_or_else(|| "<no dom snapshot>".to_string());
-                    eprintln!("native-shell: dom snapshot {snapshot}");
-                }
-                Err(error) => {
-                    eprintln!("native-shell: dom snapshot failed: {error}");
-                }
-            },
-        );
+        log_webview_dom_snapshot(view, "finished");
+
+        let view_after_2s = view.clone();
+        glib::timeout_add_local_once(std::time::Duration::from_secs(2), move || {
+            log_webview_dom_snapshot(&view_after_2s, "after-2s");
+        });
+
+        let view_after_6s = view.clone();
+        glib::timeout_add_local_once(std::time::Duration::from_secs(6), move || {
+            log_webview_dom_snapshot(&view_after_6s, "after-6s");
+        });
     });
     webview.connect_load_failed(|_, event, uri, error| {
         eprintln!("native-shell: load failed event={event:?} uri={uri} error={error}");
@@ -523,8 +588,9 @@ fn run_wry_shell(web_root: PathBuf) -> Result<(), String> {
         .map_err(|error| format!("failed to create window: {error}"))?;
 
     let asset_root = web_root.clone();
+    let init_script = build_shell_init_script(&web_root);
     let _webview = WebViewBuilder::new()
-        .with_initialization_script(SHELL_INIT_SCRIPT)
+        .with_initialization_script(&init_script)
         .with_ipc_handler(|request| {
             eprintln!("ipc> {}", request.body());
         })
@@ -660,24 +726,34 @@ fn simple_response(
 }
 
 fn apply_frontend_asset_overrides(file_path: &Path, bytes: Vec<u8>) -> Vec<u8> {
-    if file_path.extension().and_then(|extension| extension.to_str()) != Some("js") {
+    let Some(file_name) = file_path.file_name().and_then(|name| name.to_str()) else {
         return bytes;
+    };
+
+    if file_name.starts_with("plugins-cards-grid-") && file_name.ends_with(".js") {
+        return patch_plugins_cards_grid_asset(bytes);
     }
 
-    patch_home_hero_mascot(bytes)
+    bytes
 }
 
-fn patch_home_hero_mascot(bytes: Vec<u8>) -> Vec<u8> {
+fn patch_plugins_cards_grid_asset(bytes: Vec<u8>) -> Vec<u8> {
+    const ORIGINAL_SNIPPET: &str = "i=!v&&y==null&&!x.some(e=>e.id===t),a=r?.data?.status===De?`disabled-by-admin`:i||r!=null&&!r.isPending&&r.error==null&&r.data==null?`connector-unavailable`:null;";
+    const PATCHED_SNIPPET: &str = "i=!v&&y==null&&!x.some(e=>e.id===t),a=r?.data?.status===De?`disabled-by-admin`:(x.length>0&&(i||r!=null&&!r.isPending&&r.error==null&&r.data==null))?`connector-unavailable`:null;";
+
     let Ok(text) = String::from_utf8(bytes.clone()) else {
         return bytes;
     };
 
-    if text.contains(HOME_HERO_MASCOT_SNIPPET) || !text.contains(HOME_HERO_MASCOT_MARKER) {
+    if !text.contains(ORIGINAL_SNIPPET) {
         return text.into_bytes();
     }
 
-    text.replacen(HOME_HERO_ICON_SNIPPET, HOME_HERO_MASCOT_SNIPPET, 1)
-        .into_bytes()
+    text.replace(ORIGINAL_SNIPPET, PATCHED_SNIPPET).into_bytes()
+}
+
+fn build_shell_init_script(_web_root: &Path) -> String {
+    String::from(SHELL_INIT_SCRIPT)
 }
 
 fn sanitize_relative_path(path: &str) -> Option<PathBuf> {
@@ -1171,24 +1247,16 @@ fn handle_fetch_request(
             Ok(())
         }
         "/wham/accounts/check" => {
-            dispatch_fetch_success(
-                webview,
-                request_id,
-                json!({
-                    "account_ordering": [],
-                    "accounts": {},
-                }),
-            );
+            let snapshot = read_effective_auth_snapshot(auth_state);
+            dispatch_fetch_success(webview, request_id, wham_accounts_check_response(&snapshot));
             Ok(())
         }
         url if url.starts_with("/accounts/check/") => {
+            let snapshot = read_effective_auth_snapshot(auth_state);
             dispatch_fetch_success(
                 webview,
                 request_id,
-                json!({
-                    "account_ordering": [],
-                    "accounts": {},
-                }),
+                detailed_accounts_check_response(&snapshot),
             );
             Ok(())
         }
@@ -1249,9 +1317,7 @@ fn handle_fetch_request(
             Ok(())
         }
         "/subscriptions/auto_top_up/enable" => {
-            let request = body
-                .and_then(parse_json_body)
-                .unwrap_or(JsonValue::Null);
+            let request = body.and_then(parse_json_body).unwrap_or(JsonValue::Null);
             let recharge_threshold = request
                 .get("recharge_threshold")
                 .cloned()
@@ -1273,9 +1339,7 @@ fn handle_fetch_request(
             Ok(())
         }
         "/subscriptions/auto_top_up/update" => {
-            let request = body
-                .and_then(parse_json_body)
-                .unwrap_or(JsonValue::Null);
+            let request = body.and_then(parse_json_body).unwrap_or(JsonValue::Null);
             let recharge_threshold = request
                 .get("recharge_threshold")
                 .cloned()
@@ -1404,7 +1468,9 @@ fn handle_fetch_request(
         "vscode://codex/ipc-request" => {
             let response = body
                 .and_then(parse_json_body)
-                .map(|request| handle_native_ipc_request(webview, persisted_atoms, global_state, &request))
+                .map(|request| {
+                    handle_native_ipc_request(webview, persisted_atoms, global_state, &request)
+                })
                 .unwrap_or_else(|| ipc_error_response("ipc-request is missing json body"));
             dispatch_fetch_success(webview, request_id, response);
             Ok(())
@@ -1716,6 +1782,39 @@ fn handle_fetch_request(
                     "bodyMarkdown": JsonValue::Null,
                     "title": "Terms of service",
                     "url": JsonValue::Null,
+                }),
+            );
+            Ok(())
+        }
+        "/aip/connectors/links/noauth" => {
+            let request = body.and_then(parse_json_body).unwrap_or(JsonValue::Null);
+            let connector_id = request
+                .get("connector_id")
+                .and_then(JsonValue::as_str)
+                .unwrap_or("connector");
+            dispatch_fetch_success(
+                webview,
+                request_id,
+                json!({
+                    "link": {
+                        "id": format!("native-link-{connector_id}"),
+                        "name": connector_stub_name(connector_id),
+                    },
+                }),
+            );
+            Ok(())
+        }
+        "/aip/connectors/links/oauth" => {
+            let request = body.and_then(parse_json_body).unwrap_or(JsonValue::Null);
+            let connector_id = request
+                .get("connector_id")
+                .and_then(JsonValue::as_str)
+                .unwrap_or("connector");
+            dispatch_fetch_success(
+                webview,
+                request_id,
+                json!({
+                    "redirect_url": connector_install_url(connector_id),
                 }),
             );
             Ok(())
@@ -2320,11 +2419,7 @@ fn infer_mail_provider(domain: &str) -> &'static str {
     let domain = domain.trim().to_ascii_lowercase();
     match domain.as_str() {
         "gmail.com" | "googlemail.com" | "google.com" => "google",
-        "outlook.com"
-        | "hotmail.com"
-        | "live.com"
-        | "msn.com"
-        | "office365.com"
+        "outlook.com" | "hotmail.com" | "live.com" | "msn.com" | "office365.com"
         | "microsoft.com" => "microsoft",
         _ => "other",
     }
@@ -2342,10 +2437,7 @@ fn load_codex_agents_md() -> Result<JsonValue, String> {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(error) => {
-            return Err(format!(
-                "failed to read {}: {error}",
-                path.display()
-            ));
+            return Err(format!("failed to read {}: {error}", path.display()));
         }
     };
     Ok(json!({
@@ -2367,12 +2459,8 @@ fn save_codex_agents_md(body: Option<&str>) -> Result<JsonValue, String> {
         .to_string();
 
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| {
-            format!(
-                "failed to create {}: {error}",
-                parent.display()
-            )
-        })?;
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
     }
 
     fs::write(&path, &contents)
@@ -2528,6 +2616,86 @@ fn parse_aip_connector_tos_request(url: &str) -> Option<&str> {
 }
 
 #[cfg(target_os = "linux")]
+fn native_account_identity(snapshot: &LocalAuthSnapshot) -> Option<(String, JsonValue)> {
+    let account = snapshot.account.as_ref()?;
+    let account_type = account
+        .get("type")
+        .and_then(JsonValue::as_str)
+        .unwrap_or("unknown");
+    let plan_type = account
+        .get("planType")
+        .and_then(JsonValue::as_str)
+        .unwrap_or("unknown");
+    let email = account
+        .get("email")
+        .and_then(JsonValue::as_str)
+        .map(str::to_owned);
+    let id = email
+        .as_deref()
+        .map(|email| format!("acct-{}", email.replace(['@', '.'], "-")))
+        .unwrap_or_else(|| format!("acct-{account_type}"));
+    let display_name = email
+        .clone()
+        .unwrap_or_else(|| "Default account".to_string());
+
+    Some((
+        id.clone(),
+        json!({
+            "id": id,
+            "type": account_type,
+            "email": email,
+            "name": display_name,
+            "structure": "personal",
+            "planType": plan_type,
+        }),
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn wham_accounts_check_response(snapshot: &LocalAuthSnapshot) -> JsonValue {
+    if let Some((id, account)) = native_account_identity(snapshot) {
+        json!({
+            "account_ordering": [id],
+            "accounts": [account],
+        })
+    } else {
+        json!({
+            "account_ordering": [],
+            "accounts": [],
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn detailed_accounts_check_response(snapshot: &LocalAuthSnapshot) -> JsonValue {
+    if let Some((id, account)) = native_account_identity(snapshot) {
+        let account_id = id.clone();
+        json!({
+            "account_ordering": [account_id.clone()],
+            "accounts": {
+                account_id: {
+                    "account": {
+                        "account_user_role": "owner",
+                        "id": id,
+                        "name": account.get("name").cloned().unwrap_or(JsonValue::Null),
+                        "email": account.get("email").cloned().unwrap_or(JsonValue::Null),
+                        "plan_type": account.get("planType").cloned().unwrap_or(JsonValue::Null),
+                    },
+                    "entitlement": {
+                        "billing_currency": "USD",
+                    },
+                }
+            },
+        })
+    } else {
+        json!({
+            "account_ordering": [],
+            "accounts": {},
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn connector_stub_metadata_response(connector_id: &str) -> JsonValue {
     let name = connector_stub_name(connector_id);
 
@@ -2536,12 +2704,13 @@ fn connector_stub_metadata_response(connector_id: &str) -> JsonValue {
         "name": name,
         "display_name": name,
         "description": JsonValue::Null,
+        "installUrl": connector_install_url(connector_id),
         "logo_url": format!("connectors://{connector_id}/logo?theme=light"),
         "logo_url_dark": format!("connectors://{connector_id}/logo?theme=dark"),
         "link_params_schema": JsonValue::Null,
         "supported_auth": [
             {
-                "type": "oauth",
+                "type": "OAUTH",
             }
         ],
         "branding": {
@@ -2551,6 +2720,13 @@ fn connector_stub_metadata_response(connector_id: &str) -> JsonValue {
             "developer": JsonValue::Null,
         },
     })
+}
+
+#[cfg(target_os = "linux")]
+fn connector_install_url(connector_id: &str) -> String {
+    format!(
+        "https://chatgpt.com/gpts/editor#settings/Connectors?connector={connector_id}&referrer=app_directory"
+    )
 }
 
 #[cfg(target_os = "linux")]
@@ -2992,6 +3168,110 @@ fn apply_config_batch_write(config_state: &JsonMapState, params: &JsonValue) -> 
 
 #[cfg(target_os = "linux")]
 fn native_model_catalog() -> JsonValue {
+    if let Some(cached_catalog) = load_cached_model_catalog() {
+        return JsonValue::Array(cached_catalog);
+    }
+
+    default_native_model_catalog()
+}
+
+#[cfg(target_os = "linux")]
+fn load_cached_model_catalog() -> Option<Vec<JsonValue>> {
+    let cache_path = codex_home_dir().join("models_cache.json");
+    let contents = fs::read_to_string(cache_path).ok()?;
+    let cache = serde_json::from_str::<JsonValue>(&contents).ok()?;
+    model_catalog_from_cache_value(&cache)
+}
+
+#[cfg(target_os = "linux")]
+fn model_catalog_from_cache_value(cache: &JsonValue) -> Option<Vec<JsonValue>> {
+    let models = cache.get("models")?.as_array()?;
+    let normalized = normalize_cached_model_catalog(models);
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn normalize_cached_model_catalog(models: &[JsonValue]) -> Vec<JsonValue> {
+    models
+        .iter()
+        .filter_map(normalize_cached_model_entry)
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn normalize_cached_model_entry(model: &JsonValue) -> Option<JsonValue> {
+    let visibility = model
+        .get("visibility")
+        .and_then(JsonValue::as_str)
+        .unwrap_or("list");
+    if visibility == "hide" {
+        return None;
+    }
+
+    let slug = model.get("slug").and_then(JsonValue::as_str)?.to_string();
+    let display_name = model
+        .get("display_name")
+        .and_then(JsonValue::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(slug.as_str())
+        .to_string();
+    let reasoning_effort_options: Vec<JsonValue> = model
+        .get("supported_reasoning_levels")
+        .and_then(JsonValue::as_array)
+        .map(|levels| {
+            levels
+                .iter()
+                .filter_map(|level| level.get("effort").and_then(JsonValue::as_str))
+                .map(|effort| json!(effort))
+                .collect()
+        })
+        .unwrap_or_default();
+    let additional_speed_tiers = model
+        .get("additional_speed_tiers")
+        .and_then(JsonValue::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut service_tiers = vec![json!("default")];
+    service_tiers.extend(additional_speed_tiers);
+
+    Some(json!({
+        "id": slug,
+        "slug": model.get("slug").cloned().unwrap_or(JsonValue::Null),
+        "name": display_name,
+        "display_name": model.get("display_name").cloned().unwrap_or_else(|| json!(display_name)),
+        "description": model.get("description").cloned().unwrap_or(JsonValue::Null),
+        "provider": "openai",
+        "available": true,
+        "deprecated": false,
+        "visibility": visibility,
+        "priority": model.get("priority").cloned().unwrap_or(JsonValue::Null),
+        "supported_in_api": model
+            .get("supported_in_api")
+            .cloned()
+            .unwrap_or_else(|| json!(true)),
+        "availability_nux": model.get("availability_nux").cloned().unwrap_or(JsonValue::Null),
+        "upgrade": model.get("upgrade").cloned().unwrap_or(JsonValue::Null),
+        "default_reasoning_effort": model
+            .get("default_reasoning_level")
+            .cloned()
+            .unwrap_or_else(|| json!("medium")),
+        "reasoning_effort_options": reasoning_effort_options,
+        "supports_reasoning_effort": model
+            .get("supported_reasoning_levels")
+            .and_then(JsonValue::as_array)
+            .map(|levels| !levels.is_empty())
+            .unwrap_or(false),
+        "supports_reasoning_summary": true,
+        "service_tiers": service_tiers,
+    }))
+}
+
+#[cfg(target_os = "linux")]
+fn default_native_model_catalog() -> JsonValue {
     json!([
         {
             "id": "gpt-5.4",
@@ -3033,6 +3313,75 @@ fn native_model_catalog() -> JsonValue {
             "service_tiers": ["default"]
         }
     ])
+}
+
+#[cfg(target_os = "linux")]
+fn extract_model_catalog_ids(models: &JsonValue) -> Vec<String> {
+    models
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|model| {
+            model
+                .get("id")
+                .or_else(|| model.get("slug"))
+                .or_else(|| model.get("display_name"))
+                .or_else(|| model.get("name"))
+                .and_then(JsonValue::as_str)
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn fallback_model_list_response(request_id: &str, models: JsonValue) -> JsonValue {
+    json!({
+        "id": request_id,
+        "result": {
+            "data": models,
+            "nextCursor": null,
+        }
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn repair_model_list_response(message: JsonValue) -> JsonValue {
+    let response_id = match message.get("id").and_then(JsonValue::as_str) {
+        Some(response_id) => response_id.to_string(),
+        None => return message,
+    };
+
+    if let Some(data) = message
+        .get("result")
+        .and_then(|result| result.get("data"))
+        .filter(|data| {
+            data.as_array()
+                .map(|items| !items.is_empty())
+                .unwrap_or(false)
+        })
+    {
+        let ids = extract_model_catalog_ids(data);
+        eprintln!(
+            "native-shell: app-server model/list returned {} models [{}]",
+            ids.len(),
+            ids.join(", ")
+        );
+        return message;
+    }
+
+    let fallback_models = native_model_catalog();
+    let fallback_ids = extract_model_catalog_ids(&fallback_models);
+    let reason = if message.get("error").is_some() {
+        "error"
+    } else {
+        "empty"
+    };
+    eprintln!(
+        "native-shell: app-server model/list returned {reason}; falling back to {} models [{}]",
+        fallback_ids.len(),
+        fallback_ids.join(", ")
+    );
+    fallback_model_list_response(&response_id, fallback_models)
 }
 
 #[cfg(target_os = "linux")]
@@ -3539,14 +3888,19 @@ fn start_app_server_bridge(
         .take()
         .ok_or("failed to capture codex app-server stderr")?;
     let child = Arc::new(Mutex::new(child));
-    let writer = Arc::new(Mutex::new(stdin));
+    let writer_state = Arc::new(Mutex::new(AppServerWriterState {
+        writer: stdin,
+        initialized: false,
+        pending_lines: Vec::new(),
+        pending_request_methods: HashMap::new(),
+    }));
     let bridge = AppServerBridge {
         child: child.clone(),
-        writer: writer.clone(),
+        writer_state: writer_state.clone(),
     };
 
     bridge.send_json(&json!({
-        "id": "native-shell:init",
+        "id": APP_SERVER_INIT_REQUEST_ID,
         "method": "initialize",
         "params": {
             "clientInfo": {
@@ -3558,6 +3912,7 @@ fn start_app_server_bridge(
             },
         },
     }))?;
+    let writer_state_for_stdout = writer_state.clone();
 
     let stderr_tx = event_tx.clone();
     thread::spawn(move || {
@@ -3606,7 +3961,7 @@ fn start_app_server_bridge(
                 }
             };
 
-            if message.get("id").and_then(JsonValue::as_str) == Some("native-shell:init") {
+            if message.get("id").and_then(JsonValue::as_str) == Some(APP_SERVER_INIT_REQUEST_ID) {
                 if message.get("error").is_some() {
                     let _ = event_tx.send(AppServerBridgeEvent::Fatal(
                         message
@@ -3616,6 +3971,10 @@ fn start_app_server_bridge(
                             .unwrap_or("codex app-server initialize failed")
                             .to_string(),
                     ));
+                } else if let Err(error) = mark_app_server_initialized(&writer_state_for_stdout) {
+                    let _ = event_tx.send(AppServerBridgeEvent::Fatal(format!(
+                        "failed to flush queued app-server requests: {error}"
+                    )));
                 }
                 continue;
             }
@@ -3630,7 +3989,12 @@ fn start_app_server_bridge(
             } else if message.get("id").is_some()
                 && (message.get("result").is_some() || message.get("error").is_some())
             {
-                AppServerBridgeEvent::Response(message)
+                let request_method =
+                    take_app_server_request_method(&writer_state_for_stdout, &message);
+                AppServerBridgeEvent::Response {
+                    message,
+                    request_method,
+                }
             } else {
                 AppServerBridgeEvent::Fatal(format!(
                     "unsupported app-server message shape: {}",
@@ -3652,7 +4016,15 @@ fn start_app_server_bridge(
 #[cfg(target_os = "linux")]
 fn handle_app_server_event(webview: &WebView, event: AppServerBridgeEvent) {
     match event {
-        AppServerBridgeEvent::Response(message) => {
+        AppServerBridgeEvent::Response {
+            message,
+            request_method,
+        } => {
+            let message = if request_method.as_deref() == Some("model/list") {
+                repair_model_list_response(message)
+            } else {
+                message
+            };
             dispatch_message_to_view(
                 webview,
                 &json!({
@@ -3694,6 +4066,60 @@ fn handle_app_server_event(webview: &WebView, event: AppServerBridgeEvent) {
             );
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn log_webview_dom_snapshot(view: &WebView, label: &str) {
+    let script = format!(
+        r#"(function(){{
+                const snapshotLabel = {label:?};
+                const root = document.getElementById('root');
+                const heroHeading = Array.from(document.querySelectorAll('div, span, h1, h2')).find((node) => {{
+                    const text = (node.textContent || '').trim();
+                    return (
+                        text === 'Let’s build' ||
+                        text === "Let's build" ||
+                        /^What should we work on(?:\\s+in\\s+.+)?\\?$/i.test(text)
+                    );
+                }}) || null;
+                const visibleMascots = Array.from(document.querySelectorAll('[data-testid="codex-avatar"]')).filter((node) => {{
+                    if (!(node instanceof HTMLElement)) return false;
+                    const style = window.getComputedStyle(node);
+                    if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity || '1') === 0) return false;
+                    const rect = node.getBoundingClientRect();
+                    return rect.width > 0 && rect.height > 0;
+                }});
+                const addToCodexButton = Array.from(document.querySelectorAll('button, [role="button"]')).find((node) => ((node.textContent || '').trim()) === 'Add to Codex') || null;
+                return JSON.stringify({{
+                    label: snapshotLabel,
+                    href: window.location.href,
+                    title: document.title,
+                    bodyClass: document.body.className,
+                    rootChildCount: root ? root.childElementCount : null,
+                    textSample: (document.body.innerText || '').slice(0, 500),
+                    heroHeadingText: heroHeading ? (heroHeading.textContent || '').trim() : null,
+                    heroHeadingParentClass: heroHeading && heroHeading.parentElement ? heroHeading.parentElement.className : null,
+                    heroHeadingGrandparentClass: heroHeading && heroHeading.parentElement && heroHeading.parentElement.parentElement ? heroHeading.parentElement.parentElement.className : null,
+                    mascotCount: document.querySelectorAll('[data-testid="codex-avatar"]').length,
+                    visibleMascotCount: visibleMascots.length,
+                    addToCodexDisabled: addToCodexButton ? (addToCodexButton.getAttribute('aria-disabled') || addToCodexButton.disabled || false) : null
+                }});
+            }})()"#,
+        label = label
+    );
+
+    view.run_javascript(&script, None::<&gio::Cancellable>, |result| match result {
+        Ok(result) => {
+            let snapshot = result
+                .js_value()
+                .map(|value| value.to_string().to_string())
+                .unwrap_or_else(|| "<no dom snapshot>".to_string());
+            eprintln!("native-shell: dom snapshot {snapshot}");
+        }
+        Err(error) => {
+            eprintln!("native-shell: dom snapshot failed: {error}");
+        }
+    });
 }
 
 #[cfg(target_os = "linux")]
@@ -4132,7 +4558,9 @@ mod tests {
             .expect("statsig overrides should exist");
 
         assert_eq!(
-            overrides.get(AVATAR_OVERLAY_GATE_KEY).and_then(JsonValue::as_bool),
+            overrides
+                .get(AVATAR_OVERLAY_GATE_KEY)
+                .and_then(JsonValue::as_bool),
             Some(true)
         );
         assert_eq!(
@@ -4176,25 +4604,122 @@ mod tests {
     }
 
     #[test]
-    fn patch_home_hero_mascot_replaces_placeholder_icon() {
-        let source = format!(
-            "prefix {} middle {} suffix",
-            HOME_HERO_MASCOT_MARKER, HOME_HERO_ICON_SNIPPET
-        );
+    fn connector_stub_uses_supported_auth_enum() {
+        let metadata = connector_stub_metadata_response("connector_test");
+        let supported_auth = metadata
+            .get("supported_auth")
+            .and_then(JsonValue::as_array)
+            .expect("supported_auth should be an array");
+        let auth_type = supported_auth
+            .first()
+            .and_then(JsonValue::as_object)
+            .and_then(|auth| auth.get("type"))
+            .and_then(JsonValue::as_str);
 
-        let patched = patch_home_hero_mascot(source.into_bytes());
-        let patched = String::from_utf8(patched).expect("patched hero should remain utf-8");
-
-        assert!(patched.contains(HOME_HERO_MASCOT_SNIPPET));
-        assert!(!patched.contains(HOME_HERO_ICON_SNIPPET));
+        assert_eq!(auth_type, Some("OAUTH"));
     }
 
     #[test]
-    fn patch_home_hero_mascot_skips_unrelated_assets() {
-        let source = b"console.log('plain asset')".to_vec();
+    fn patch_plugins_cards_grid_asset_delays_unavailable_state_until_directory_hydrates() {
+        let source = "prefix i=!v&&y==null&&!x.some(e=>e.id===t),a=r?.data?.status===De?`disabled-by-admin`:i||r!=null&&!r.isPending&&r.error==null&&r.data==null?`connector-unavailable`:null; suffix";
+        let patched = String::from_utf8(patch_plugins_cards_grid_asset(source.as_bytes().to_vec()))
+            .expect("patched bundle should remain valid utf-8");
 
-        let patched = apply_frontend_asset_overrides(Path::new("assets/plain.js"), source.clone());
+        assert!(patched.contains(
+            "(x.length>0&&(i||r!=null&&!r.isPending&&r.error==null&&r.data==null))?`connector-unavailable`"
+        ));
+        assert!(!patched.contains(
+            ":i||r!=null&&!r.isPending&&r.error==null&&r.data==null?`connector-unavailable`"
+        ));
+    }
 
-        assert_eq!(patched, source);
+    #[test]
+    fn model_catalog_from_cache_uses_visible_models() {
+        let cache = json!({
+            "models": [
+                {
+                    "slug": "gpt-5.5",
+                    "display_name": "GPT-5.5",
+                    "description": "Newest model",
+                    "default_reasoning_level": "medium",
+                    "supported_reasoning_levels": [
+                        { "effort": "low" },
+                        { "effort": "medium" },
+                        { "effort": "high" },
+                        { "effort": "xhigh" }
+                    ],
+                    "visibility": "list",
+                    "supported_in_api": true,
+                    "priority": 1,
+                    "additional_speed_tiers": ["fast"]
+                },
+                {
+                    "slug": "codex-auto-review",
+                    "display_name": "Codex Auto Review",
+                    "default_reasoning_level": "medium",
+                    "supported_reasoning_levels": [{ "effort": "medium" }],
+                    "visibility": "hide",
+                    "supported_in_api": true,
+                    "priority": 99,
+                    "additional_speed_tiers": []
+                }
+            ]
+        });
+
+        let catalog = model_catalog_from_cache_value(&cache).expect("cache catalog should parse");
+        let ids = extract_model_catalog_ids(&JsonValue::Array(catalog.clone()));
+        assert_eq!(ids, vec!["gpt-5.5"]);
+
+        let first = catalog
+            .first()
+            .expect("catalog should contain one visible model");
+        assert_eq!(
+            first.get("service_tiers"),
+            Some(&json!(["default", "fast"]))
+        );
+        assert_eq!(
+            first.get("reasoning_effort_options"),
+            Some(&json!(["low", "medium", "high", "xhigh"]))
+        );
+    }
+
+    #[test]
+    fn repair_model_list_response_falls_back_when_backend_errors() {
+        let message = json!({
+            "id": "models-1",
+            "error": {
+                "message": "boom"
+            }
+        });
+
+        let repaired = repair_model_list_response(message);
+        let ids = extract_model_catalog_ids(
+            repaired
+                .get("result")
+                .and_then(|result| result.get("data"))
+                .expect("fallback response should include data"),
+        );
+
+        assert!(!ids.is_empty());
+        assert!(ids.contains(&"gpt-5.4".to_string()));
+    }
+
+    #[test]
+    fn repair_model_list_response_preserves_non_empty_backend_catalog() {
+        let message = json!({
+            "id": "models-2",
+            "result": {
+                "data": [
+                    {
+                        "id": "gpt-5.5",
+                        "display_name": "GPT-5.5"
+                    }
+                ],
+                "nextCursor": null
+            }
+        });
+
+        let repaired = repair_model_list_response(message.clone());
+        assert_eq!(repaired, message);
     }
 }
