@@ -8,12 +8,26 @@ on:
     paths:
       - 'packaging/aur/**'
       - 'scripts/sync-aur-repo.sh'
+      - '.github/workflows/publish-aur.yml'
+  workflow_run:
+    workflows:
+      - Sync Upstream Frontend
+    types:
+      - completed
 
 permissions:
   contents: read
 
+concurrency:
+  group: publish-aur-package
+  cancel-in-progress: false
+
 jobs:
   publish:
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-latest
     container:
       image: archlinux:base-devel
@@ -40,6 +54,8 @@ jobs:
       - name: Check out repository
         if: steps.aur_secret.outputs.present == 'true'
         uses: actions/checkout@v5
+        with:
+          ref: main
 
       - name: Mark workspace safe for git
         if: steps.aur_secret.outputs.present == 'true'
