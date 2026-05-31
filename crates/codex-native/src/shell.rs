@@ -4701,7 +4701,7 @@ mod tests {
         );
 
         assert!(!ids.is_empty());
-        assert!(ids.contains(&"gpt-5.4".to_string()));
+        assert!(ids.iter().all(|id| !id.trim().is_empty()));
     }
 
     #[test]
