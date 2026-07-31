@@ -15,7 +15,7 @@ Usage:
 
 Examples:
   scripts/bump-codex-frontend.sh --latest
-  scripts/bump-codex-frontend.sh 26.415.40636 /tmp/Codex-darwin-arm64-26.415.40636.zip
+  scripts/bump-codex-frontend.sh 26.727.40816 /tmp/ChatGPT-darwin-arm64-26.727.40816.zip
 EOF
 }
 
@@ -31,7 +31,7 @@ refresh_srcinfo_without_makepkg() {
   fi
 
   perl -0pi -e "s/(pkgver = ).*/\1r0.0/" "$srcinfo_path"
-  perl -0pi -e "s/Codex-darwin-arm64-[0-9.]+\\.zip/${zip_file_name}/g" "$srcinfo_path"
+  perl -0pi -e "s/(Codex|ChatGPT)-darwin-arm64-[0-9.]+\\.zip/${zip_file_name}/g" "$srcinfo_path"
   perl -0pi -e "s/sha256sums = [0-9a-f]{64}/sha256sums = ${sha256}/" "$srcinfo_path"
 }
 
@@ -43,9 +43,10 @@ if [[ "${1:-}" == "--latest" ]]; then
   appcast_metadata="$(latest_from_appcast)"
   version="$(printf '%s\n' "$appcast_metadata" | awk -F= '/^version=/{print $2}')"
   zip_url="$(printf '%s\n' "$appcast_metadata" | awk -F= '/^zip_url=/{print $2}')"
+  zip_file_name="$(basename "$zip_url")"
   temp_dir="$(mktemp -d)"
   trap 'rm -rf "$temp_dir"' EXIT
-  zip_path="$temp_dir/Codex-darwin-arm64-${version}.zip"
+  zip_path="$temp_dir/$zip_file_name"
   curl -fLo "$zip_path" "$zip_url"
 elif [[ $# -eq 2 ]]; then
   version="$1"
@@ -61,10 +62,12 @@ if [[ ! -f "$zip_path" ]]; then
 fi
 
 sha256="$(sha256sum "$zip_path" | awk '{print $1}')"
-zip_file_name="Codex-darwin-arm64-${version}.zip"
+zip_file_name="$(basename "$zip_path")"
+artifact_prefix="${zip_file_name%-${version}.zip}"
 
 perl -0pi -e "s/_codex_frontend_version=.*/_codex_frontend_version=${version}/" "$pkgbuild_path"
-perl -0pi -e "s/Codex-darwin-arm64-[0-9.]+\\.zip/${zip_file_name}/g" "$pkgbuild_path"
+perl -0pi -e "s/_codex_frontend_artifact=.*/_codex_frontend_artifact=${artifact_prefix}/" "$pkgbuild_path"
+perl -0pi -e "s/(Codex|ChatGPT)-darwin-arm64-[0-9.]+\\.zip/${zip_file_name}/g" "$pkgbuild_path"
 perl -0pi -e "s/'[0-9a-f]{64}'/'${sha256}'/" "$pkgbuild_path"
 
 if command -v makepkg >/dev/null 2>&1 && [[ "$is_root" -ne 0 ]]; then
