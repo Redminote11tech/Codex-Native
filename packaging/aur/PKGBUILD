@@ -10,7 +10,7 @@ optdepends=('codex: Codex CLI backend bridge for chat, auth, and runtime integra
 makedepends=('cargo' 'git' 'rust' 'unzip')
 provides=('codex-native')
 conflicts=('codex-native')
-_codex_frontend_version=26.730.61309
+_codex_frontend_version=26.730.61639
 _codex_frontend_artifact=ChatGPT-darwin-arm64
 source=(
   "codex-native::git+${url}.git"
@@ -18,7 +18,7 @@ source=(
 )
 sha256sums=(
   'SKIP'
-  'aec30478c9cddfa38e0e8bb8669d85c3d01ff88008b6fa39461e8c8d26a21948'
+  'da88c8a15eab1ddc8efdf50182d4aca7468d995193d952c344a4d10d38c45871'
 )
 
 pkgver() {
