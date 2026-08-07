@@ -17,8 +17,8 @@ pkgbase = codex-native-git
 	provides = codex-native
 	conflicts = codex-native
 	source = codex-native::git+https://github.com/Redminote11tech/Codex-Native.git
-	source = ChatGPT-darwin-arm64-26.730.61639.zip::https://persistent.oaistatic.com/codex-app-prod/ChatGPT-darwin-arm64-26.730.61639.zip
+	source = ChatGPT-darwin-arm64-26.803.41515.zip::https://persistent.oaistatic.com/codex-app-prod/ChatGPT-darwin-arm64-26.803.41515.zip
 	sha256sums = SKIP
-	sha256sums = da88c8a15eab1ddc8efdf50182d4aca7468d995193d952c344a4d10d38c45871
+	sha256sums = 8abd46bf063bc27cbadcbc2863007ac44365b13a23ede17ceaee81fb9eeaeb9a
 
 pkgname = codex-native-git
