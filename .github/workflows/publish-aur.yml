@@ -6,8 +6,13 @@ on:
     branches:
       - main
     paths:
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
       - 'packaging/aur/**'
+      - 'packaging/aur-bin/**'
       - 'scripts/sync-aur-repo.sh'
+      - 'scripts/sync-aur-bin-repo.sh'
       - '.github/workflows/publish-aur.yml'
   workflow_run:
     workflows:
@@ -23,7 +28,82 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  build-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    container:
+      image: archlinux:base-devel
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      asset_sha256: ${{ steps.release.outputs.asset_sha256 }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Install tooling
+        run: |
+          set -euo pipefail
+          # Refresh the keyring first: stale images fail signature checks.
+          for attempt in 1 2 3; do
+            if pacman -Sy --noconfirm --needed archlinux-keyring; then
+              break
+            fi
+            echo "keyring refresh failed (attempt ${attempt}/3)"
+            sleep $((attempt * 15))
+          done
+          pacman -Su --noconfirm --needed git rust pkgconf gtk3 webkit2gtk-4.1 libsoup3 openssl github-cli curl
+
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Mark workspace safe for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Build and attach release binary when missing
+        id: release
+        run: |
+          set -euo pipefail
+          tag="r$(git rev-list --count HEAD).$(git rev-parse --short HEAD)"
+          asset_name="codex-native-${tag}-linux-x86_64.tar.gz"
+          asset_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}/${asset_name}"
+
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "Release ${tag} already exists; reusing."
+            digest="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" \
+              --jq ".assets[] | select(.name == \"${asset_name}\") | .digest" || true)"
+            if [[ "$digest" != sha256:* ]]; then
+              echo "digest unavailable from API; hashing asset directly"
+              digest="sha256:$(curl -fsSL "$asset_url" | sha256sum | awk '{print $1}')"
+            fi
+            {
+              echo "tag=${tag}"
+              echo "asset_sha256=${digest#sha256:}"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Building release ${tag}."
+          cargo build --release -p codex-native
+
+          stage="$(mktemp -d)"
+          cp target/release/codex-native "$stage/codex-native"
+          cp LICENSE "$stage/LICENSE"
+          tar -czf "$asset_name" -C "$stage" codex-native LICENSE
+          asset_sha256="$(sha256sum "$asset_name" | awk '{print $1}')"
+
+          gh release create "$tag" "$asset_name" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "codex-native ${tag}" \
+            --notes "Prebuilt x86_64 binary consumed by the codex-native-bin AUR package."
+
+          {
+            echo "tag=${tag}"
+            echo "asset_sha256=${asset_sha256}"
+          } >> "$GITHUB_OUTPUT"
+
   publish:
+    needs: build-release
     if: >-
       github.event_name != 'workflow_run' ||
       (github.event.workflow_run.conclusion == 'success' &&
@@ -34,8 +114,9 @@ jobs:
       image: archlinux:base-devel
 
     env:
-      AUR_PACKAGE_NAME: codex-native-git
       AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+      RELEASE_TAG: ${{ needs.build-release.outputs.tag }}
+      RELEASE_ASSET_SHA256: ${{ needs.build-release.outputs.asset_sha256 }}
 
     steps:
       - name: Check AUR secret availability
@@ -60,7 +141,7 @@ jobs:
             echo "keyring refresh failed (attempt ${attempt}/3)"
             sleep $((attempt * 15))
           done
-          pacman -Su --noconfirm --needed git openssh
+          pacman -Su --noconfirm --needed git openssh perl
 
       - name: Check out repository
         if: steps.aur_secret.outputs.present == 'true'
@@ -105,30 +186,56 @@ jobs:
           EOF
           chmod 600 "${ssh_dir}/config"
 
-      - name: Clone AUR repository
+      - name: Sync source package to AUR
         if: steps.aur_secret.outputs.present == 'true'
-        env:
-          GIT_SSH_COMMAND: ssh -F /root/.ssh/config
-        run: git clone "ssh://aur@aur.archlinux.org/${AUR_PACKAGE_NAME}.git" /tmp/aur-repo
-
-      - name: Sync package files
-        if: steps.aur_secret.outputs.present == 'true'
-        run: ./scripts/sync-aur-repo.sh /tmp/aur-repo
-
-      - name: Commit and push when packaging changed
-        if: steps.aur_secret.outputs.present == 'true'
+        working-directory: /tmp
         env:
           GIT_SSH_COMMAND: ssh -F /root/.ssh/config
         run: |
-          cd /tmp/aur-repo
+          set -euo pipefail
+          rm -rf aur-codex-native-git
+          git clone -q "ssh://aur@aur.archlinux.org/codex-native-git.git" aur-codex-native-git
+          "$GITHUB_WORKSPACE/scripts/sync-aur-repo.sh" /tmp/aur-codex-native-git
+          cd aur-codex-native-git
           if git diff --quiet --exit-code; then
-            echo "No AUR changes to publish."
-            exit 0
+            echo "No AUR changes to publish for codex-native-git."
+          else
+            version="$(sed -n 's/^pkgver=//p' PKGBUILD)"
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add PKGBUILD .SRCINFO codex-native.desktop codex-native-launcher README.md
+            git commit -q -m "Update codex-native-git to ${version}"
+            git push -q origin master
+            echo "Pushed codex-native-git ${version} to AUR."
           fi
 
+      - name: Sync binary package to AUR
+        if: steps.aur_secret.outputs.present == 'true'
+        working-directory: /tmp
+        env:
+          GIT_SSH_COMMAND: ssh -F /root/.ssh/config
+        run: |
+          set -euo pipefail
+          rm -rf aur-codex-native-bin
+          git clone -q "ssh://aur@aur.archlinux.org/codex-native-bin.git" aur-codex-native-bin \
+            || { echo "codex-native-bin does not exist yet; initializing new AUR package."; git init -q -b master aur-codex-native-bin; }
+          cd aur-codex-native-bin
+          if ! git remote get-url origin > /dev/null 2>&1; then
+            git remote add origin "ssh://aur@aur.archlinux.org/codex-native-bin.git"
+          fi
+          "$GITHUB_WORKSPACE/scripts/sync-aur-bin-repo.sh" /tmp/aur-codex-native-bin
+          if git diff --quiet --exit-code && git rev-parse -q --verify HEAD > /dev/null; then
+            echo "No AUR changes to publish for codex-native-bin."
+            exit 0
+          fi
           version="$(sed -n 's/^pkgver=//p' PKGBUILD)"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add PKGBUILD .SRCINFO codex-native.desktop codex-native-launcher README.md
-          git commit -m "Update ${AUR_PACKAGE_NAME} to ${version}"
-          git push origin master
+          if git rev-parse -q --verify HEAD > /dev/null; then
+            git commit -q -m "Update codex-native-bin to ${version}"
+          else
+            git commit -q -m "Initial import of codex-native-bin at ${version}"
+          fi
+          git push -q origin master
+          echo "Pushed codex-native-bin ${version} to AUR."

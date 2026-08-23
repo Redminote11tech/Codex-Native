@@ -3,8 +3,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-source_dir="$repo_root/packaging/aur"
-target_dir="${1:-}"
+source_dir="${2:-$repo_root/packaging/aur}"
 pkgver="r$(git -C "$repo_root" rev-list --count HEAD).$(git -C "$repo_root" rev-parse --short HEAD)"
 is_root="${EUID:-$(id -u)}"
 
