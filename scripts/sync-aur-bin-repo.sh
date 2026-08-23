@@ -49,17 +49,17 @@ sed -i "s/^_release_asset_sha256=.*/_release_asset_sha256='$release_asset_sha256
 
 patch_srcinfo() {
   local file="$1"
-  sed -i \
-    -e "s/^\(\s*pkgver = \).*/\1$pkgver/" \
-    -e "s/^\(\s*_release_tag = \).*/\1$release_tag/" \
-    -e "s/^\(\s*_release_asset_sha256 = \).*/\1$release_asset_sha256/" \
-    "$file"
+  # Braced ${1}: a bare backreference followed by a hex digit (e.g. "\14f...")
+  # is parsed as backreference 14 by sed and silently drops characters.
+  perl -pi -e "s/^([ \\t]*pkgver = ).*/\${1}${pkgver}/" "$file"
+  perl -pi -e "s/^([ \\t]*_release_tag = ).*/\${1}${release_tag}/" "$file"
+  perl -pi -e "s/^([ \\t]*_release_asset_sha256 = ).*/\${1}${release_asset_sha256}/" "$file"
   # Rewrite expanded values: source URLs embed the release tag, and the asset
   # checksum sits on the sha256sums line directly below the tarball source.
   sed -i -E "/linux-x86_64\.tar\.gz/s/r[0-9]+\.[0-9a-f]+/$release_tag/g" "$file"
   # Asset checksum is the first sha256sums line (array order); source entries
   # are not adjacent to their checksums in .SRCINFO.
-  perl -0pi -e 's{^([ \t]*sha256sums = )(?:[0-9a-f]{64}|SKIP)}{$1'"$release_asset_sha256"'}m' "$file"
+  perl -0pi -e 's{^([ \t]*sha256sums = )(?:[0-9a-f]{64}|SKIP)}{${1}'"$release_asset_sha256"'}m' "$file"
 }
 if command -v makepkg >/dev/null 2>&1 && [[ "$is_root" -ne 0 ]]; then
   (
