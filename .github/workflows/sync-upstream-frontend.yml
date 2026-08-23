@@ -16,12 +16,23 @@ concurrency:
 jobs:
   sync:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     container:
       image: archlinux:base-devel
 
     steps:
       - name: Install tooling
-        run: pacman -Sy --noconfirm curl git
+        run: |
+          set -euo pipefail
+          # Refresh the keyring first: stale images fail signature checks.
+          for attempt in 1 2 3; do
+            if pacman -Sy --noconfirm --needed archlinux-keyring; then
+              break
+            fi
+            echo "keyring refresh failed (attempt ${attempt}/3)"
+            sleep $((attempt * 15))
+          done
+          pacman -Su --noconfirm --needed curl git perl
 
       - name: Check out repository
         uses: actions/checkout@v5
@@ -29,19 +40,40 @@ jobs:
       - name: Mark workspace safe for git
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-      - name: Bump pinned frontend metadata
-        run: ./scripts/bump-codex-frontend.sh --latest
-
-      - name: Commit and push when upstream changed
+      - name: Configure release bot identity
         run: |
-          if git diff --quiet --exit-code; then
-            echo "No upstream frontend change detected."
-            exit 0
-          fi
-
-          version="$(sed -n 's/^_codex_frontend_version=//p' packaging/aur/PKGBUILD)"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add packaging/aur/PKGBUILD packaging/aur/.SRCINFO
-          git commit -m "Bump frontend bundle to ${version}"
-          git push
+
+      - name: Bump, commit, and push when upstream changed
+        run: |
+          set -euo pipefail
+
+          for attempt in 1 2 3; do
+            # Start every attempt from the current tip so a concurrently
+            # advanced main never wedges this workflow.
+            git fetch origin main
+            git reset --hard origin/main
+
+            ./scripts/bump-codex-frontend.sh --latest
+
+            if git diff --quiet --exit-code; then
+              echo "No upstream frontend change detected."
+              exit 0
+            fi
+
+            version="$(sed -n 's/^_codex_frontend_version=//p' packaging/aur/PKGBUILD)"
+            git add packaging/aur/PKGBUILD packaging/aur/.SRCINFO
+            git commit -m "Bump frontend bundle to ${version}"
+
+            if git push origin HEAD:main; then
+              echo "Pushed frontend bump ${version}."
+              exit 0
+            fi
+
+            echo "main advanced during push; retrying (attempt ${attempt}/3)."
+            sleep 15
+          done
+
+          echo "Failed to push frontend bump after 3 attempts." >&2
+          exit 1

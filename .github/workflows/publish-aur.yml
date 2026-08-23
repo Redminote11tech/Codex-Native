@@ -29,6 +29,7 @@ jobs:
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     container:
       image: archlinux:base-devel
 
@@ -49,7 +50,17 @@ jobs:
 
       - name: Install tooling
         if: steps.aur_secret.outputs.present == 'true'
-        run: pacman -Sy --noconfirm git openssh
+        run: |
+          set -euo pipefail
+          # Refresh the keyring first: stale images fail signature checks.
+          for attempt in 1 2 3; do
+            if pacman -Sy --noconfirm --needed archlinux-keyring; then
+              break
+            fi
+            echo "keyring refresh failed (attempt ${attempt}/3)"
+            sleep $((attempt * 15))
+          done
+          pacman -Su --noconfirm --needed git openssh
 
       - name: Check out repository
         if: steps.aur_secret.outputs.present == 'true'
@@ -64,12 +75,26 @@ jobs:
       - name: Configure SSH for AUR
         if: steps.aur_secret.outputs.present == 'true'
         run: |
+          set -euo pipefail
           ssh_dir="/root/.ssh"
           install -dm700 "${ssh_dir}"
           printf '%s\n' "${AUR_SSH_PRIVATE_KEY}" > "${ssh_dir}/aur"
           chmod 600 "${ssh_dir}/aur"
-          ssh-keyscan -H aur.archlinux.org >> "${ssh_dir}/known_hosts"
-          ssh-keyscan -H -p 22 aur.archlinux.org >> "${ssh_dir}/known_hosts"
+
+          known_hosts="${ssh_dir}/known_hosts"
+          rm -f "${known_hosts}"
+          for attempt in 1 2 3; do
+            if ssh-keyscan -H aur.archlinux.org > "${known_hosts}" 2>/dev/null && [[ -s "${known_hosts}" ]]; then
+              break
+            fi
+            echo "ssh-keyscan failed (attempt ${attempt}/3)"
+            sleep $((attempt * 10))
+          done
+          if [[ ! -s "${known_hosts}" ]]; then
+            echo "could not reach aur.archlinux.org" >&2
+            exit 1
+          fi
+
           cat > "${ssh_dir}/config" <<'EOF'
           Host aur.archlinux.org
             User aur
