@@ -57,13 +57,14 @@ jobs:
 
             ./scripts/bump-codex-frontend.sh --latest
 
-            if git diff --quiet --exit-code; then
+            git add packaging/aur/PKGBUILD packaging/aur/.SRCINFO packaging/aur-bin/PKGBUILD packaging/aur-bin/.SRCINFO
+
+            if git diff --cached --quiet; then
               echo "No upstream frontend change detected."
               exit 0
             fi
 
             version="$(sed -n 's/^_codex_frontend_version=//p' packaging/aur/PKGBUILD)"
-            git add packaging/aur/PKGBUILD packaging/aur/.SRCINFO
             git commit -m "Bump frontend bundle to ${version}"
 
             if git push origin HEAD:main; then
@@ -71,7 +72,6 @@ jobs:
               exit 0
             fi
 
-            git add packaging/aur/PKGBUILD packaging/aur/.SRCINFO packaging/aur-bin/PKGBUILD packaging/aur-bin/.SRCINFO
             sleep 15
           done
 

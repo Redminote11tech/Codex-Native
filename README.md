@@ -1,5 +1,8 @@
 # Codex-Native
 
+> [!WARNING]
+> **This project is discontinued.** ChatGPT now ships an official native Linux desktop app, which makes this project pointless. The repository has been archived and is read-only; the AUR packages are unmaintained.
+
 Codex-Native is a native Linux shell for the Codex desktop frontend. It replaces the Electron host with a Rust application built on GTK and WebKitGTK, while reusing the official frontend assets locally and talking to Codex through the Codex CLI app-server bridge.
 
 The goal is simple: keep the existing Codex desktop look and behavior, but run it in a lighter native shell instead of bundling Chromium and Node as the app runtime.
